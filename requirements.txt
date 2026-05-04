@@ -1,0 +1,20 @@
+# Audio recording
+pyaudio==0.2.14
+
+# Keyboard shortcuts
+pynput==1.7.6
+
+# Clipboard management
+pyperclip==1.9.0
+
+# Keystroke simulation
+pyautogui==0.9.54
+
+# HTTP requests (for transcription APIs)
+requests==2.32.3
+
+# Environment variable management
+python-dotenv==1.0.1
+
+# UI feedback (terminal output)
+rich==13.9.4
