@@ -9,6 +9,7 @@ Global keyboard shortcuts:
 Transcribed text is automatically copied to clipboard and pasted.
 """
 
+import argparse
 import sys
 import time
 from pynput import keyboard
@@ -212,11 +213,33 @@ class VoiceDictation:
         self.recorder.shutdown()
 
 
+def build_transcriber(provider: str, verbose: bool) -> Transcriber:
+    """Construct a transcriber for the given provider name."""
+    if provider == "assemblyai":
+        return AssemblyAIClient()
+    if provider == "whisper":
+        from whisper_client import WhisperClient
+        if verbose:
+            print("[DEBUG] Loading local Whisper model...")
+        return WhisperClient()
+    raise ValueError(f"Unknown transcription provider: {provider}")
+
+
 def main():
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Voice dictation app")
+    parser.add_argument(
+        "--provider", "-p",
+        choices=["assemblyai", "whisper"],
+        default="assemblyai",
+        help="Transcription provider to use (default: assemblyai)"
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
+    args = parser.parse_args()
+
     try:
-        verbose = "--verbose" in sys.argv or "-v" in sys.argv
-        app = VoiceDictation(verbose=verbose)
+        transcriber = build_transcriber(args.provider, args.verbose)
+        app = VoiceDictation(transcriber=transcriber, verbose=args.verbose)
         app.run()
     except ValueError as e:
         console = Console()
