@@ -5,6 +5,9 @@ Voice Dictation App with AssemblyAI
 Global keyboard shortcuts:
 - Ctrl+Cmd+R (double-tap within 1 second): Toggle recording (start/stop and transcribe)
 - Ctrl+Cmd+X (double-tap within 1 second): Discard current recording without transcribing
+- Ctrl+Cmd+A (double-tap within 1 second): Start/finish an aside recording while
+  the main recording is paused; the aside is transcribed and pasted, then the
+  main recording resumes from where it left off
 
 Transcribed text is automatically copied to clipboard and pasted.
 """
@@ -38,10 +41,15 @@ class VoiceDictation:
         # Double-press tracking
         self.last_trigger_time = 0
         self.last_discard_time = 0
+        self.last_aside_time = 0
         self.DOUBLE_PRESS_WINDOW = 1.0  # seconds
 
         # Application state
         self.is_recording = False
+        # Aside state: when in an aside, the main recording's captured frames
+        # are stashed here so we can resume after the aside finishes.
+        self.aside_active = False
+        self.stashed_main_frames = None
 
     def start_recording(self):
         """Start audio recording."""
@@ -58,6 +66,10 @@ class VoiceDictation:
             return
 
         self.is_recording = False
+        # If R is pressed while in an aside, drop the stashed main frames —
+        # the user is ending the session, not finishing the aside.
+        self.aside_active = False
+        self.stashed_main_frames = None
         self.console.print("[bold yellow]⏳ Transcribing...[/bold yellow]")
 
         # Stop recording and get audio file
@@ -95,12 +107,61 @@ class VoiceDictation:
             self.recorder.cleanup()
             self.show_ready_status()
 
+    def toggle_aside(self):
+        """Pause the main recording to start an aside, or finish the aside
+        and resume the main recording.
+        """
+        if not self.is_recording:
+            self.console.print("[bold yellow]⚠️  No active recording to aside from[/bold yellow]")
+            return
+
+        if not self.aside_active:
+            # Pause main recording, stash its frames, start fresh aside recording.
+            self.stashed_main_frames = self.recorder.pause_recording()
+            self.is_recording = False
+            self.aside_active = True
+            self.recorder.start_recording()
+            self.is_recording = True
+            self.console.print("[bold magenta]↪ Aside recording...[/bold magenta] (main paused)")
+            return
+
+        # Finishing the aside: stop, transcribe, paste, then resume main.
+        self.console.print("[bold yellow]⏳ Transcribing aside...[/bold yellow]")
+        audio_file = self.recorder.stop_recording()
+        self.is_recording = False
+        self.aside_active = False
+
+        try:
+            if not audio_file:
+                self.console.print("[bold red]❌ No aside audio recorded[/bold red]")
+            else:
+                text = self.transcriber.transcribe_file(audio_file, verbose=self.verbose)
+                if text:
+                    self.clipboard.copy_and_paste(text)
+                    preview = text[:100] + "..." if len(text) > 100 else text
+                    self.console.print(f"[bold green]✅ Aside pasted: {preview}[/bold green]")
+                else:
+                    self.console.print("[bold red]❌ Aside transcription failed[/bold red]")
+        except Exception as e:
+            self.console.print(f"[bold red]❌ Aside error: {str(e)}[/bold red]")
+        finally:
+            self.recorder.cleanup()
+
+        # Resume main recording with the previously stashed frames.
+        resume_frames = self.stashed_main_frames or []
+        self.stashed_main_frames = None
+        self.recorder.start_recording(initial_frames=resume_frames)
+        self.is_recording = True
+        self.console.print("[bold red]🔴 Resumed main recording...[/bold red]")
+
     def discard_recording(self):
         """Stop recording and discard without transcribing."""
         if not self.is_recording:
             return
 
         self.is_recording = False
+        self.aside_active = False
+        self.stashed_main_frames = None
         self.console.print("[bold yellow]🗑️  Discarding recording...[/bold yellow]")
 
         # Stop recording and discard the audio file
@@ -118,6 +179,16 @@ class VoiceDictation:
         if hasattr(key, 'vk') and key.vk == 15:
             return True
         if hasattr(key, 'char') and key.char in ('r', 'R'):
+            return True
+        return False
+
+    @staticmethod
+    def _is_a_key(key):
+        """Check if the pressed key is 'a' regardless of held modifiers."""
+        # vk 0 is 'a' on macOS
+        if hasattr(key, 'vk') and key.vk == 0:
+            return True
+        if hasattr(key, 'char') and key.char in ('a', 'A'):
             return True
         return False
 
@@ -164,6 +235,15 @@ class VoiceDictation:
                     else:
                         # First press — record the time
                         self.last_discard_time = now
+            elif self._is_a_key(key):
+                # Detect Ctrl+Cmd+A (double-tap to toggle aside recording)
+                if self.cmd_pressed and self.ctrl_pressed:
+                    now = time.time()
+                    if now - self.last_aside_time <= self.DOUBLE_PRESS_WINDOW:
+                        self.last_aside_time = 0
+                        self.toggle_aside()
+                    else:
+                        self.last_aside_time = now
 
         except AttributeError:
             pass
@@ -192,6 +272,7 @@ class VoiceDictation:
             "Shortcuts:\n"
             "  [bold]Ctrl+Cmd+R (x2)[/bold] - Start/Stop recording & transcribe\n"
             "  [bold]Ctrl+Cmd+X (x2)[/bold] - Discard recording (no transcription)\n"
+            "  [bold]Ctrl+Cmd+A (x2)[/bold] - Aside: pause main, record/paste aside, then resume\n"
             "  [bold]Ctrl+C[/bold] - Exit\n",
             title="🎤 Voice Dictation",
             border_style="cyan"

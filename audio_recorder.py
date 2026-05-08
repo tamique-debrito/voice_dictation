@@ -22,8 +22,12 @@ class AudioRecorder:
         self.recording_thread: Optional[threading.Thread] = None
         self.temp_file: Optional[str] = None
 
-    def start_recording(self):
-        """Start recording audio from microphone."""
+    def start_recording(self, initial_frames=None):
+        """Start recording audio from microphone.
+
+        If initial_frames is provided, the new recording will be appended
+        to those frames (used to resume a paused recording).
+        """
         if self.is_recording:
             return
 
@@ -35,7 +39,7 @@ class AudioRecorder:
                 pass
             self.stream = None
 
-        self.frames = []
+        self.frames = list(initial_frames) if initial_frames else []
         self.is_recording = True
 
         # Open audio stream
@@ -97,6 +101,31 @@ class AudioRecorder:
             wf.writeframes(b''.join(self.frames))
 
         return self.temp_file
+
+    def pause_recording(self) -> list:
+        """Stop the audio stream but return the captured frames without
+        writing a temp file. Frames are also cleared from the recorder so
+        a fresh recording can be started.
+
+        Returns:
+            list: The frames captured so far (may be empty).
+        """
+        if not self.is_recording:
+            return list(self.frames)
+
+        self.is_recording = False
+
+        if self.recording_thread:
+            self.recording_thread.join()
+
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+
+        frames = self.frames
+        self.frames = []
+        return frames
 
     def save_recording(self) -> Optional[str]:
         """
