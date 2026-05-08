@@ -27,12 +27,13 @@ from transcriber import Transcriber
 class VoiceDictation:
     """Main application class for voice dictation."""
 
-    def __init__(self, transcriber: Transcriber = None, verbose: bool = False):
+    def __init__(self, transcriber: Transcriber = None, verbose: bool = False, save_recordings: bool = True):
         self.console = Console()
         self.recorder = AudioRecorder()
         self.transcriber = transcriber or AssemblyAIClient()
         self.clipboard = ClipboardManager()
         self.verbose = verbose
+        self.save_recordings = save_recordings
 
         # Keyboard state tracking
         self.cmd_pressed = False
@@ -81,10 +82,11 @@ class VoiceDictation:
             return
 
         try:
-            # Save audio file before transcription
-            saved_path = self.recorder.save_recording()
-            if saved_path:
-                self.console.print(f"[dim]💾 Saved: {saved_path}[/dim]")
+            # Save audio file before transcription (unless disabled)
+            if self.save_recordings:
+                saved_path = self.recorder.save_recording()
+                if saved_path:
+                    self.console.print(f"[dim]💾 Saved: {saved_path}[/dim]")
 
             # Transcribe audio
             text = self.transcriber.transcribe_file(audio_file, verbose=self.verbose)
@@ -316,11 +318,20 @@ def main():
         help="Transcription provider to use (default: assemblyai)"
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Do not save recordings to disk after transcription"
+    )
     args = parser.parse_args()
 
     try:
         transcriber = build_transcriber(args.provider, args.verbose)
-        app = VoiceDictation(transcriber=transcriber, verbose=args.verbose)
+        app = VoiceDictation(
+            transcriber=transcriber,
+            verbose=args.verbose,
+            save_recordings=not args.no_save,
+        )
         app.run()
     except ValueError as e:
         console = Console()
