@@ -10,6 +10,8 @@ ASSEMBLYAI_UPLOAD_URL = "https://api.assemblyai.com/v2/upload"
 ASSEMBLYAI_TRANSCRIPT_URL = "https://api.assemblyai.com/v2/transcript"
 SPEECH_MODEL = "best"
 POLL_INTERVAL = 1.0
+UPLOAD_TIMEOUT = 10.0
+UPLOAD_MAX_ATTEMPTS = 5
 
 
 class AssemblyAIClient(Transcriber):
@@ -26,18 +28,25 @@ class AssemblyAIClient(Transcriber):
             "Authorization": self.api_key,
         }
 
-    def upload_file(self, file_path: str) -> str:
-        """Upload audio file to AssemblyAI."""
-        with open(file_path, 'rb') as f:
-            response = requests.post(
-                ASSEMBLYAI_UPLOAD_URL,
-                headers=self.headers,
-                data=f,
-                timeout=60
-            )
-
-        response.raise_for_status()
-        return response.json()['upload_url']
+    def upload_file(self, file_path: str, verbose: bool = False) -> str:
+        """Upload audio file to AssemblyAI, retrying if a request hangs."""
+        last_exc = None
+        for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+            try:
+                with open(file_path, 'rb') as f:
+                    response = requests.post(
+                        ASSEMBLYAI_UPLOAD_URL,
+                        headers=self.headers,
+                        data=f,
+                        timeout=UPLOAD_TIMEOUT
+                    )
+                response.raise_for_status()
+                return response.json()['upload_url']
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                if verbose:
+                    print(f"[DEBUG] Upload attempt {attempt}/{UPLOAD_MAX_ATTEMPTS} failed ({type(e).__name__}); retrying...")
+        raise Exception(f"Upload failed after {UPLOAD_MAX_ATTEMPTS} attempts: {last_exc}")
 
     def request_transcription(self, audio_url: str) -> str:
         """Request transcription of uploaded audio."""
@@ -93,7 +102,7 @@ class AssemblyAIClient(Transcriber):
 
         if verbose:
             print("[DEBUG] Uploading file...")
-        audio_url = self.upload_file(file_path)
+        audio_url = self.upload_file(file_path, verbose=verbose)
         if verbose:
             print(f"[DEBUG] Upload complete: {audio_url[:80]}...")
 
