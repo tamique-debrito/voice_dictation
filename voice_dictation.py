@@ -27,7 +27,7 @@ from transcriber import Transcriber
 class VoiceDictation:
     """Main application class for voice dictation."""
 
-    def __init__(self, transcriber: Transcriber = None, verbose: bool = False, save_recordings: bool = True):
+    def __init__(self, transcriber: Transcriber = None, verbose: bool = False, save_recordings: bool = False):
         self.console = Console()
         self.recorder = AudioRecorder()
         self.transcriber = transcriber or AssemblyAIClient()
@@ -319,9 +319,9 @@ def main():
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
     parser.add_argument(
-        "--no-save",
+        "--save",
         action="store_true",
-        help="Do not save recordings to disk after transcription"
+        help="Save recordings to disk after transcription (default: do not save)"
     )
     args = parser.parse_args()
 
@@ -330,7 +330,7 @@ def main():
         app = VoiceDictation(
             transcriber=transcriber,
             verbose=args.verbose,
-            save_recordings=not args.no_save,
+            save_recordings=args.save,
         )
         app.run()
     except ValueError as e:
