@@ -137,6 +137,10 @@ class PersistentApp:
         keys = set(self._marker_keys) | {"r", "a", "x", "q"}
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
 
+        # Used to undo the two visible keypresses in whichever app currently
+        # has keyboard focus when a double-tap is recognized.
+        self._kb = keyboard.Controller()
+
     # ------------------------------------------------------------------
     # Aggregator: PCM -> windows
     # ------------------------------------------------------------------
@@ -228,11 +232,25 @@ class PersistentApp:
         """Print an immediate 'recognized' line — separate from execution."""
         self.console.print(f"[dim]› recognized: {command}[/dim]")
 
+    def _undo_keypresses(self, count: int = 2) -> None:
+        """Send N backspaces to undo the double-tap that just landed in
+        whichever app currently has keyboard focus. Best-effort — in most
+        non-text contexts backspace is a no-op."""
+        try:
+            for _ in range(count):
+                self._kb.tap(keyboard.Key.backspace)
+        except Exception:
+            pass
+
     def _done(self, message: str, style: str = "bold green") -> None:
         """Print an 'executed' line for a command's actual effect."""
         self.console.print(f"[{style}]✓ executed:[/{style}] {message}")
 
     def _on_action(self, char: str) -> None:
+        # Immediately undo the two visible keystrokes in the focused app.
+        # Done before printing so the cleanup happens before any user-visible
+        # delay from the action itself.
+        self._undo_keypresses(2)
         if char in self._marker_keys:
             self._ack(f"marker `{char}`")
             self._handle_marker(char)
