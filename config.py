@@ -58,8 +58,26 @@ DEFAULT_MARKERS = [
 ]
 
 # faster-whisper config. CTranslate2 has no Metal backend on macOS, so
-# device=cpu is the only option here. small.en runs comfortably above
-# real-time on M-series CPUs at int8.
+# darwin always falls back to CPU. On a CUDA system we auto-detect and
+# pick GPU. Override via env var if you want to force cpu or cuda.
 FW_MODEL = os.getenv("FW_MODEL", "small.en")
-FW_DEVICE = os.getenv("FW_DEVICE", "cpu")
 FW_COMPUTE = os.getenv("FW_COMPUTE", "int8")
+
+
+def _auto_detect_device() -> str:
+    """Pick 'cuda' when a CUDA-capable GPU is visible to CTranslate2, else 'cpu'.
+
+    CTranslate2's CUDA build links against cuBLAS/cuDNN; on a CPU-only
+    system the import still succeeds but get_cuda_device_count() returns 0.
+    Any failure path falls back to cpu so the app keeps working.
+    """
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+FW_DEVICE = os.getenv("FW_DEVICE") or _auto_detect_device()
