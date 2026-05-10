@@ -17,9 +17,27 @@ Selected with `--provider`:
 - `assemblyai` (default) — AssemblyAI REST API, slam-1 model. Requires `ASSEMBLYAI_API_KEY` (env var or AWS Secrets Manager entry `assemblyai_api_key` in `us-west-2`).
 - `whisper` — Local Whisper model.
 
+## Key binding configuration
+
+Hotkeys can be overridden with a local JSON file (gitignored). Place `local_config.json` in the repo root or pass `--config path/to/file.json`.
+
+```json
+{
+  "modifiers": ["shift", "ctrl"],
+  "keys": {
+    "toggle_recording": "r",
+    "discard_recording": "x",
+    "toggle_aside": "a"
+  }
+}
+```
+
+Supported modifiers: `ctrl`, `cmd`, `alt`, `shift`.
+
 ## Flags
 
 - `--provider, -p` — `assemblyai` or `whisper`.
+- `--config, -c` — Path to key binding config JSON (auto-loads `local_config.json` if present).
 - `--save` — Save recordings to disk after transcription (off by default).
 - `--verbose, -v` — Print debug info.
 

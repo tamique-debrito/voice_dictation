@@ -4,3 +4,4 @@ recordings/
 .env
 recordings.zip
 *.wav
+local_config.json

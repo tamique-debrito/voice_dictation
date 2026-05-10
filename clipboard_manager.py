@@ -1,8 +1,14 @@
 """Clipboard and paste automation functionality."""
 
+import platform
 import pyperclip
 import pyautogui
 import time
+
+if platform.system() == "Windows":
+    PASTE_KEY = "ctrl"
+else:  # macOS / Linux
+    PASTE_KEY = "command"
 
 
 class ClipboardManager:
@@ -39,7 +45,7 @@ class ClipboardManager:
             # pyautogui.press("enter")
 
             # Paste using Cmd+V
-            pyautogui.hotkey("command", "v")
+            pyautogui.hotkey(PASTE_KEY, "v")
 
         except Exception as e:
             print(f"Warning: Could not simulate paste: {e}")
