@@ -4,11 +4,11 @@ Records speech via global hotkeys, transcribes it, and automatically copies to c
 
 ## Hotkeys
 
-All hotkeys are double-tap (press twice within 1 second) while holding Ctrl+Cmd.
+All hotkeys are double-tap (press twice within 1 second) while holding the platform modifiers (Mac: Cmd+Shift, Windows: Win+Ctrl).
 
-- **Ctrl+Cmd+R** — Toggle recording. Second toggle stops, transcribes, and pastes.
-- **Ctrl+Cmd+X** — Discard the active recording without transcribing.
-- **Ctrl+Cmd+A** — Aside: pause the main recording, record an aside, transcribe and paste it, then resume the main recording where it left off.
+- **R** — Toggle recording. Second toggle stops, transcribes, and pastes.
+- **X** — Discard the active recording without transcribing.
+- **A** — Aside: pause the main recording, record an aside, transcribe and paste it, then resume the main recording where it left off.
 
 ## Transcription providers
 

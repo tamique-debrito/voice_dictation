@@ -4,80 +4,41 @@ Voice Dictation App
 
 Global keyboard shortcuts (configurable via local_config.json):
 - Default (Mac):    Ctrl+Cmd+R  (double-tap): Toggle recording
-- Default (Mac):    Ctrl+Cmd+X  (double-tap): Discard recording
+- Default (Mac):    Ctrl+Cmd+X  (double-tap): Discard recording (or aside)
 - Default (Mac):    Ctrl+Cmd+A  (double-tap): Aside recording
 
 Pass --config path/to/config.json to override, or place local_config.json
 in the same directory for automatic loading.
+
+Pass --no-modifiers (or set ``"no_modifiers": true`` in the config) to use
+bare double-taps of R/A/X with no modifier keys held. Useful when you don't
+want to hold Ctrl+Cmd, but means R/A/X cannot be focused into a text input.
 """
 
 import argparse
-import json
-import os
-import sys
 import time
+
 from pynput import keyboard
 from rich.console import Console
 from rich.panel import Panel
+
 from audio_recorder import AudioRecorder
 from assemblyai_client import AssemblyAIClient
 from clipboard_manager import ClipboardManager
 from transcriber import Transcriber
-
-
-import platform as _platform
-
-if _platform.system() == "Windows":
-    _DEFAULT_MODIFIERS = ["cmd", "ctrl"]  # Win+Shift
-else:  # macOS
-    _DEFAULT_MODIFIERS = ["ctrl", "cmd"]   # Ctrl+Cmd
-
-DEFAULT_CONFIG = {
-    "modifiers": _DEFAULT_MODIFIERS,
-    "keys": {
-        "toggle_recording": "r",
-        "discard_recording": "x",
-        "toggle_aside": "a",
-    },
-}
-
-# Maps config modifier names → sets of pynput Key objects
-_MODIFIER_MAP = {
-    "ctrl":  {keyboard.Key.ctrl, keyboard.Key.ctrl_r, keyboard.Key.ctrl_l},
-    "cmd":   {keyboard.Key.cmd, keyboard.Key.cmd_r},
-    "alt":   {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr},
-    "shift": {keyboard.Key.shift, keyboard.Key.shift_r},
-}
-
-
-def load_config(path: str | None) -> dict:
-    if path is None:
-        auto = os.path.join(os.path.dirname(__file__), "local_config.json")
-        path = auto if os.path.exists(auto) else None
-    if path is None:
-        return DEFAULT_CONFIG
-    with open(path) as f:
-        cfg = json.load(f)
-    return {**DEFAULT_CONFIG, **cfg, "keys": {**DEFAULT_CONFIG["keys"], **cfg.get("keys", {})}}
-
-
-def _key_char(key) -> str | None:
-    try:
-        c = key.char
-        if not c:
-            return None
-        # When Ctrl is held, pynput gives a control character (e.g. \x12 for R).
-        # Decode it back to the plain letter so hotkey matching works on Windows.
-        if len(c) == 1 and ord(c) < 32:
-            return chr(ord(c) + 96)
-        return c.lower()
-    except AttributeError:
-        return None
+from hotkeys import (
+    DEFAULT_CONFIG,
+    BareDoubleTap,
+    ModifierTracker,
+    key_char,
+    load_config,
+)
 
 
 class VoiceDictation:
     def __init__(self, transcriber: Transcriber = None, verbose: bool = False,
-                 save_recordings: bool = False, config: dict = None):
+                 save_recordings: bool = False, config: dict = None,
+                 no_modifiers: bool = False):
         self.console = Console()
         self.recorder = AudioRecorder()
         self.transcriber = transcriber or AssemblyAIClient()
@@ -86,32 +47,34 @@ class VoiceDictation:
         self.save_recordings = save_recordings
 
         cfg = config or DEFAULT_CONFIG
-        self._required_modifiers: list[str] = cfg["modifiers"]
         self._action_keys: dict[str, str] = cfg["keys"]
-        self._pressed_modifiers: set[str] = set()
+        self._required_modifiers: list[str] = cfg["modifiers"]
+        self._no_modifiers = bool(no_modifiers or cfg.get("no_modifiers"))
+        self._mods = ModifierTracker(self._required_modifiers)
 
-        # Double-press tracking
-        self.last_trigger_time = 0
-        self.last_discard_time = 0
-        self.last_aside_time = 0
+        # Double-press tracking (modifier mode)
+        self.last_trigger_time = 0.0
+        self.last_discard_time = 0.0
+        self.last_aside_time = 0.0
         self.DOUBLE_PRESS_WINDOW = 1.0
+
+        # Bare double-tap (no-modifiers mode) — built lazily once we know keys
+        self._bare = None
+        if self._no_modifiers:
+            tracked = {
+                self._action_keys["toggle_recording"],
+                self._action_keys["discard_recording"],
+                self._action_keys["toggle_aside"],
+            }
+            self._bare = BareDoubleTap(
+                window=self.DOUBLE_PRESS_WINDOW,
+                keys=tracked,
+                on_double_tap=self._handle_action,
+            )
 
         self.is_recording = False
         self.aside_active = False
         self.stashed_main_frames = None
-
-    def _modifiers_active(self) -> bool:
-        return all(m in self._pressed_modifiers for m in self._required_modifiers)
-
-    def _update_modifier(self, key, pressed: bool):
-        for name, keys in _MODIFIER_MAP.items():
-            if key in keys:
-                if pressed:
-                    self._pressed_modifiers.add(name)
-                else:
-                    self._pressed_modifiers.discard(name)
-                return True
-        return False
 
     def start_recording(self):
         if self.is_recording:
@@ -187,7 +150,25 @@ class VoiceDictation:
         self.is_recording = True
         self.console.print("[bold red]🔴 Resumed main recording...[/bold red]")
 
+    def cancel_aside(self):
+        """Discard the aside-only audio and resume the parked main recording."""
+        if not self.aside_active:
+            return
+        self.recorder.stop_recording()
+        self.recorder.cleanup()
+        self.aside_active = False
+        self.is_recording = False
+        resume_frames = self.stashed_main_frames or []
+        self.stashed_main_frames = None
+        self.recorder.start_recording(initial_frames=resume_frames)
+        self.is_recording = True
+        self.console.print("[bold cyan]✗ Aside cancelled[/bold cyan] — main recording resumed")
+
     def discard_recording(self):
+        # If we're currently in an aside, cancel only the aside and resume main.
+        if self.aside_active:
+            self.cancel_aside()
+            return
         if not self.is_recording:
             return
         self.is_recording = False
@@ -199,31 +180,48 @@ class VoiceDictation:
         self.console.print("[bold cyan]✗ Recording discarded[/bold cyan]")
         self.show_ready_status()
 
+    # ------------------------------------------------------------------
+    # Key dispatch
+    # ------------------------------------------------------------------
+
+    def _handle_action(self, char: str) -> None:
+        """Run the action mapped to a hotkey character (already debounced)."""
+        if char == self._action_keys["toggle_recording"]:
+            self.stop_recording() if self.is_recording else self.start_recording()
+        elif char == self._action_keys["discard_recording"]:
+            self.discard_recording()
+        elif char == self._action_keys["toggle_aside"]:
+            self.toggle_aside()
+
     def on_press(self, key):
         try:
-            if self._update_modifier(key, True):
+            if self._no_modifiers:
+                self._bare.feed(key_char(key))
                 return
-            if not self._modifiers_active():
+            # Modifier-keyed mode: track modifier state and require it.
+            if self._mods.update(key, True):
                 return
-            char = _key_char(key)
+            if not self._mods.all_required_active():
+                return
+            char = key_char(key)
             if char is None:
                 return
             now = time.time()
             if char == self._action_keys["toggle_recording"]:
                 if now - self.last_trigger_time <= self.DOUBLE_PRESS_WINDOW:
-                    self.last_trigger_time = 0
+                    self.last_trigger_time = 0.0
                     self.stop_recording() if self.is_recording else self.start_recording()
                 else:
                     self.last_trigger_time = now
             elif char == self._action_keys["discard_recording"]:
                 if now - self.last_discard_time <= self.DOUBLE_PRESS_WINDOW:
-                    self.last_discard_time = 0
+                    self.last_discard_time = 0.0
                     self.discard_recording()
                 else:
                     self.last_discard_time = now
             elif char == self._action_keys["toggle_aside"]:
                 if now - self.last_aside_time <= self.DOUBLE_PRESS_WINDOW:
-                    self.last_aside_time = 0
+                    self.last_aside_time = 0.0
                     self.toggle_aside()
                 else:
                     self.last_aside_time = now
@@ -232,31 +230,54 @@ class VoiceDictation:
 
     def on_release(self, key):
         try:
-            self._update_modifier(key, False)
+            if not self._no_modifiers:
+                self._mods.update(key, False)
         except Exception:
             pass
 
-    def show_ready_status(self):
-        mods = "+".join(m.capitalize() for m in self._required_modifiers)
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+
+    def _trigger_label(self) -> str:
         r = self._action_keys["toggle_recording"].upper()
-        self.console.print(f"[bold green]✓ Ready[/bold green] - Double-press {mods}+{r} to start/stop recording")
+        if self._no_modifiers:
+            return r
+        mods = "+".join(m.capitalize() for m in self._required_modifiers)
+        return f"{mods}+{r}"
+
+    def show_ready_status(self):
+        self.console.print(
+            f"[bold green]✓ Ready[/bold green] - Double-press {self._trigger_label()} to start/stop recording"
+        )
 
     def run(self):
-        mods = "+".join(m.capitalize() for m in self._required_modifiers)
         r = self._action_keys["toggle_recording"].upper()
         x = self._action_keys["discard_recording"].upper()
         a = self._action_keys["toggle_aside"].upper()
+        if self._no_modifiers:
+            r_lbl, x_lbl, a_lbl = r, x, a
+            mode_note = (
+                "[dim]Mode: [bold]no-modifiers[/bold] — "
+                "double-tap the bare letter (don't hold Ctrl/Cmd). "
+                "Avoid pressing these letters while a text input is focused.[/dim]"
+            )
+        else:
+            mods = "+".join(m.capitalize() for m in self._required_modifiers)
+            r_lbl, x_lbl, a_lbl = f"{mods}+{r}", f"{mods}+{x}", f"{mods}+{a}"
+            mode_note = ""
         self.console.clear()
-        self.console.print(Panel.fit(
+        body = (
             "[bold cyan]Voice Dictation App[/bold cyan]\n\n"
             "Shortcuts:\n"
-            f"  [bold]{mods}+{r} (x2)[/bold] - Start/Stop recording & transcribe\n"
-            f"  [bold]{mods}+{x} (x2)[/bold] - Discard recording (no transcription)\n"
-            f"  [bold]{mods}+{a} (x2)[/bold] - Aside: pause main, record/paste aside, then resume\n"
-            "  [bold]Ctrl+C[/bold] - Exit\n",
-            title="🎤 Voice Dictation",
-            border_style="cyan"
-        ))
+            f"  [bold]{r_lbl} (x2)[/bold] - Start/Stop recording & transcribe\n"
+            f"  [bold]{x_lbl} (x2)[/bold] - Cancel: aside if in aside, else discard recording\n"
+            f"  [bold]{a_lbl} (x2)[/bold] - Aside: pause main, record/paste aside, then resume\n"
+            "  [bold]Ctrl+C[/bold] - Exit\n"
+        )
+        if mode_note:
+            body += "\n" + mode_note
+        self.console.print(Panel.fit(body, title="🎤 Voice Dictation", border_style="cyan"))
         self.show_ready_status()
         with keyboard.Listener(on_press=self.on_press, on_release=self.on_release) as listener:
             try:
@@ -279,6 +300,7 @@ def build_transcriber(provider: str, verbose: bool) -> Transcriber:
 
 
 def main():
+    import sys
     parser = argparse.ArgumentParser(description="Voice dictation app")
     parser.add_argument("--provider", "-p", choices=["assemblyai", "whisper"],
                         default="assemblyai")
@@ -286,13 +308,21 @@ def main():
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--config", "-c", default=None,
                         help="Path to JSON key binding config (default: auto-loads local_config.json)")
+    parser.add_argument("--no-modifiers", action="store_true",
+                        help="Use bare double-tap of R/A/X (no Ctrl/Cmd held). "
+                             "Avoid pressing these letters while a text input is focused.")
     args = parser.parse_args()
 
     try:
         config = load_config(args.config)
         transcriber = build_transcriber(args.provider, args.verbose)
-        app = VoiceDictation(transcriber=transcriber, verbose=args.verbose,
-                             save_recordings=args.save, config=config)
+        app = VoiceDictation(
+            transcriber=transcriber,
+            verbose=args.verbose,
+            save_recordings=args.save,
+            config=config,
+            no_modifiers=args.no_modifiers,
+        )
         app.run()
     except ValueError as e:
         Console().print(f"[bold red]Configuration Error:[/bold red] {str(e)}")

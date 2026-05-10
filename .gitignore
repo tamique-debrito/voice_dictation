@@ -5,3 +5,5 @@ recordings/
 recordings.zip
 *.wav
 local_config.json
+.DS_Store
+**/.DS_Store
