@@ -132,30 +132,34 @@ class SessionWriter:
         with self._lock:
             return getattr(self, "_latest_segment_end", 0.0)
 
-    def insert_marker(self, key: str) -> Optional[tuple[str, str]]:
+    def insert_marker(self, key: str) -> Optional[list[tuple[str, str]]]:
         """Toggle marker for the given hotkey.
 
-        Returns (action, type) where action is "open" or "close", or None if
-        the key isn't bound to a marker type.
-
-        Enforces the no-overlap rule: pressing a different marker key while
-        another type is open emits the open type's end token first.
+        Returns a list of (action, type) events emitted, or None if the key
+        isn't bound to a marker type. The list will contain one entry for a
+        simple open or close, or two entries (close-then-open) when a
+        cross-type switch auto-closes the previously open type.
         """
         type_name = self._key_to_type.get(key)
         if type_name is None:
             return None
+        events: list[tuple[str, str]] = []
         with self._lock:
             if self._open_marker_type == type_name:
                 self._append_token(marker_end(type_name))
                 self._open_marker_type = None
-                return ("close", type_name)
+                events.append(("close", type_name))
+                return events
             if self._open_marker_type is not None:
-                # Close the currently-open type, then open the new one.
-                self._append_token(marker_end(self._open_marker_type))
+                # No-overlap rule: close the currently-open type first.
+                closed = self._open_marker_type
+                self._append_token(marker_end(closed))
                 self._open_marker_type = None
+                events.append(("close", closed))
             self._append_token(marker_start(type_name))
             self._open_marker_type = type_name
-            return ("open", type_name)
+            events.append(("open", type_name))
+            return events
 
     def _append_token(self, token: str) -> None:
         if self._buffer and not self._buffer.endswith((" ", "\n")):

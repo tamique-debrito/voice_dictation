@@ -273,14 +273,16 @@ class PersistentApp:
             self._done("shutting down", style="bold yellow")
 
     def _handle_marker(self, key: str) -> None:
-        result = self.writer.insert_marker(key)
-        if result is None:
+        events = self.writer.insert_marker(key)
+        if not events:
             return
-        action, type_name = result
-        if action == "open":
-            self._done(f"opened marker [magenta]{type_name}[/magenta]")
-        else:
-            self._done(f"closed marker [magenta]{type_name}[/magenta]")
+        for action, type_name in events:
+            verb = "opened" if action == "open" else "closed"
+            note = ""
+            if len(events) > 1 and action == "close":
+                # Cross-type switch — make the auto-close obvious.
+                note = " [dim](auto, switching type)[/dim]"
+            self._done(f"{verb} marker [magenta]{type_name}[/magenta]{note}")
 
     def _toggle_r(self) -> None:
         with self._state_lock:
