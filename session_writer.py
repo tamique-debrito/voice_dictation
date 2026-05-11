@@ -208,6 +208,16 @@ class SessionWriter:
         with self._lock:
             return self._open_marker_type
 
+    def tail(self, n: int) -> str:
+        """Return the last ``n`` characters of the buffer (full buffer if shorter)."""
+        with self._lock:
+            return self._buffer[-n:] if n > 0 else ""
+
+    @property
+    def chunk_count(self) -> int:
+        with self._lock:
+            return self._chunk_index
+
     # ------------------------------------------------------------------
     # Cursors / clipboard windows
     # ------------------------------------------------------------------

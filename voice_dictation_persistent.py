@@ -35,7 +35,9 @@ import queue
 import sys
 import threading
 import time
-from datetime import datetime
+import webbrowser
+from collections import deque
+from datetime import datetime, timezone
 from typing import Optional
 
 from pynput import keyboard
@@ -59,6 +61,7 @@ from persistent_recorder import PersistentRecorder
 from session_writer import MarkerType, SessionWriter
 from silence_detector import SilenceDetector
 from streaming_transcriber import AudioWindow, Segment, StreamingTranscriber
+import widget as widget_module
 
 
 # How long an audio window can grow before we force-emit it for transcription
@@ -97,10 +100,16 @@ class _ClipboardWindow:
 
 
 class PersistentApp:
-    def __init__(self, config: dict, model: str, device: str, compute: str):
+    def __init__(self, config: dict, model: str, device: str, compute: str,
+                 enable_widget: bool = True):
         self.console = Console()
         self.config = config
         self._stop = threading.Event()
+        self._enable_widget = enable_widget
+        self._widget: Optional[widget_module.StatusServer] = None
+        self._started_at = datetime.now(tz=timezone.utc)
+        self._device = device
+        self._compute = compute
 
         marker_cfgs = config.get("persistent", {}).get("markers", DEFAULT_MARKERS)
         self.marker_types = [
@@ -134,6 +143,11 @@ class PersistentApp:
         self._r_window: Optional[_ClipboardWindow] = None
         self._aside_window: Optional[_ClipboardWindow] = None
         self._state_lock = threading.Lock()
+
+        # Status-widget state. paste_log is most-recent-first when serialized.
+        self._paste_log: deque = deque(maxlen=50)
+        # Wall-clock HH:MM:SS string of when the currently-open marker opened.
+        self._marker_open_since: Optional[str] = None
 
         # Bare double-tap dispatcher
         keys = set(self._marker_keys) | {"r", "a", "x", "q"}
@@ -285,6 +299,12 @@ class PersistentApp:
                 # Cross-type switch — make the auto-close obvious.
                 note = " [dim](auto, switching type)[/dim]"
             self._done(f"{verb} marker [magenta]{type_name}[/magenta]{note}")
+        # Update widget-visible "open since" timestamp.
+        with self._state_lock:
+            self._marker_open_since = (
+                datetime.now().strftime("%H:%M:%S")
+                if self.writer.open_marker_type() is not None else None
+            )
 
     def _toggle_r(self) -> None:
         with self._state_lock:
@@ -365,6 +385,15 @@ class PersistentApp:
         self.clipboard.copy_and_paste(text)
         preview = text[:80] + ("..." if len(text) > 80 else "")
         self._done(f"{window.label} pasted → [green]{preview}[/green]")
+        # Record for the widget paste log (most-recent-first when serialized).
+        entry = {
+            "ts": datetime.now().strftime("%H:%M:%S"),
+            "label": window.label,
+            "preview": text[:120] + ("…" if len(text) > 120 else ""),
+            "full": text,
+        }
+        with self._state_lock:
+            self._paste_log.appendleft(entry)
 
     def _cursor_time_at(self, monotonic_ts: float) -> float:
         """Estimate the session-relative time corresponding to a wall-clock press."""
@@ -388,6 +417,17 @@ class PersistentApp:
         )
         self._drain_thread.start()
 
+        if self._enable_widget:
+            try:
+                self._widget = widget_module.StatusServer(self.get_status_snapshot)
+                host, port = self._widget.start()
+                url = f"http://{host}:{port}"
+                self.console.print(f"[bold]Widget:[/bold] {url}")
+                webbrowser.open(url)
+            except Exception as e:
+                self.console.print(f"[yellow]Widget failed to start: {e}[/yellow]")
+                self._widget = None
+
         listener = keyboard.Listener(on_press=self._on_press)
         listener.start()
         try:
@@ -398,6 +438,46 @@ class PersistentApp:
         listener.stop()
         self._shutdown()
 
+    def get_status_snapshot(self) -> dict:
+        """Return the JSON payload served by the widget's /status endpoint."""
+        with self._state_lock:
+            r_active = self._r_window is not None
+            aside_active = self._aside_window is not None
+            paste_log = list(self._paste_log)
+            marker_open_since = self._marker_open_since
+        open_marker = self.writer.open_marker_type()
+        if r_active and aside_active:
+            mode = "r+aside"
+        elif r_active:
+            mode = "r"
+        elif aside_active:
+            mode = "aside"
+        else:
+            mode = "passive"
+        # If the marker state changed since last record (e.g. nothing is open
+        # now), drop the stale "open since" string.
+        if open_marker is None:
+            marker_open_since = None
+        return {
+            "session_id": self.writer.session_id,
+            "session_dir": self.writer.session_dir,
+            "model": self.transcriber.model_label,
+            "device": self._device,
+            "compute": self._compute,
+            "started_at": self._started_at.isoformat().replace("+00:00", "Z"),
+            "uptime_seconds": (datetime.now(tz=timezone.utc) - self._started_at).total_seconds(),
+            "chunk_count": self.writer.chunk_count,
+            "capture": {
+                "mode": mode,
+                "r_active": r_active,
+                "aside_active": aside_active,
+            },
+            "open_marker": open_marker,
+            "open_marker_since": marker_open_since,
+            "paste_log": paste_log,
+            "transcript_tail": self.writer.tail(500),
+        }
+
     def _on_press(self, key) -> None:
         try:
             self._dt.feed(key_char(key))
@@ -406,6 +486,13 @@ class PersistentApp:
 
     def _shutdown(self) -> None:
         self.console.print("\n[bold yellow]Shutting down — flushing...[/bold yellow]")
+        if self._widget is not None:
+            try:
+                self._widget.stop()
+                self.console.print("[dim]Widget: stopped[/dim]")
+            except Exception:
+                pass
+            self._widget = None
         self.recorder.stop()
         # Give the aggregator a moment to drain remaining frames.
         time.sleep(0.5)
@@ -459,6 +546,8 @@ def main():
                         help=f"compute device (default: {FW_DEVICE})")
     parser.add_argument("--compute", default=FW_COMPUTE,
                         help=f"compute type (default: {FW_COMPUTE})")
+    parser.add_argument("--no-widget", action="store_true",
+                        help="Disable the HTTP status widget + browser auto-open.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -467,6 +556,7 @@ def main():
         model=args.model,
         device=args.device,
         compute=args.compute,
+        enable_widget=not args.no_widget,
     )
     app.run()
 
