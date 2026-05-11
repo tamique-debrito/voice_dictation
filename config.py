@@ -89,3 +89,5 @@ def _auto_detect_device() -> str:
 
 
 FW_DEVICE = os.getenv("FW_DEVICE") or _auto_detect_device()
+
+TRANSCRIPT_STREAM_PORT = int(os.getenv("TRANSCRIPT_STREAM_PORT", "8766"))

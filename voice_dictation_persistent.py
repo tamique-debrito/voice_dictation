@@ -55,7 +55,9 @@ from config import (
     RECORDING_MARKER_TYPE,
     SAMPLE_RATE,
     SILENCE_MS,
+    TRANSCRIPT_STREAM_PORT,
 )
+from transcript_stream_server import TranscriptStreamServer
 from hotkeys import BareDoubleTap, key_char, load_config
 from persistent_recorder import PersistentRecorder
 from session_writer import MarkerType, SessionWriter
@@ -135,6 +137,7 @@ class PersistentApp:
             model_label=self.transcriber.model_label,
         )
         self.clipboard = ClipboardManager()
+        self._stream_server = TranscriptStreamServer(port=TRANSCRIPT_STREAM_PORT)
 
         self._aggregator_thread: Optional[threading.Thread] = None
         self._drain_thread: Optional[threading.Thread] = None
@@ -239,6 +242,7 @@ class PersistentApp:
             except queue.Empty:
                 continue
             self.writer.feed_segment(seg.text, seg.end_time)
+            self._stream_server.broadcast(seg.text, seg.end_time)
 
     # ------------------------------------------------------------------
     # Hotkey actions (called from pynput listener thread)
@@ -407,6 +411,7 @@ class PersistentApp:
     def run(self) -> None:
         self._print_banner()
         self.recorder.start()
+        self._stream_server.start()
         self.transcriber.start()
         self._aggregator_thread = threading.Thread(
             target=self._aggregator_loop, name="Aggregator", daemon=True
