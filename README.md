@@ -50,6 +50,30 @@ pip install -r requirements.txt
 
 macOS requires Microphone and Accessibility permissions for the terminal running the app.
 
+## Tuning hallucinations / silence behavior (persistent mode)
+
+The always-on persistent app (`voice_dictation_persistent.py`) can occasionally emit Whisper hallucinations during silence — degenerate repeats like `okay okay okay` or `thank you. thank you.` These come from faster-whisper decoding near-silent audio. Three layers of defense are in place; each is configurable via env var (or `.env`) and read at startup from `config.py`.
+
+| Knob | Default | What it controls |
+|------|---------|------------------|
+| `SILENCE_MS` | 500 | Continuous silence (ms) that triggers a window flush boundary. Raise to require longer pauses before transcribing. |
+| `VAD_AGGRESSIVENESS` | 2 | webrtcvad level (0–3). Higher = more frames classified as non-speech. Raise to 3 if silence isn't being detected and hallucinations persist. |
+| `MIN_VOICED_FRAC` | 0.15 | Minimum fraction of voiced frames in a window for it to be transcribed. Raise to drop more low-content windows; lower if real short utterances are being suppressed. |
+| `MIN_VOICED_MS` | 300 | Absolute minimum voiced audio (ms) per window. Independent of fraction — protects against single-blip windows. Both this and `MIN_VOICED_FRAC` must be met for a window to be transcribed. |
+| `FW_NO_SPEECH_THRESHOLD` | 0.8 | faster-whisper no-speech probability cutoff (its default is 0.6). Raise toward 1.0 to discard more low-confidence segments. |
+| `FW_LOG_PROB_THRESHOLD` | -0.8 | faster-whisper avg-log-prob cutoff (its default is -1.0). Raise toward 0 to require higher-confidence decodes. |
+| `FW_MODEL` | `small.en` | faster-whisper model name. Options include `tiny.en`, `base.en`, `small.en`, `medium.en`. |
+| `FW_COMPUTE` | `int8` | CTranslate2 quantization (`int8`, `int16`, `float16`, `float32`). |
+| `FW_DEVICE` | auto | `cpu` or `cuda`. Auto-detects CUDA; macOS always falls back to CPU. |
+
+Set any of these in `voice_dictation/.env` or as shell env vars before launching the persistent app. Example to make silence handling stricter:
+
+```bash
+export VAD_AGGRESSIVENESS=3
+export MIN_VOICED_FRAC=0.25
+export FW_NO_SPEECH_THRESHOLD=0.9
+```
+
 ## Files
 
 - `voice_dictation.py` — entry point, hotkey handling, app state

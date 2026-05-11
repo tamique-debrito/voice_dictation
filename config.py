@@ -32,7 +32,19 @@ CHUNK_TOKEN_TARGET = 2000
 
 # Minimum continuous silence (ms) considered a "boundary" for chunk flushing
 # and transcription window alignment.
-SILENCE_MS = 500
+SILENCE_MS = int(os.getenv("SILENCE_MS", "500"))
+
+# webrtcvad aggressiveness (0..3). Higher = more frames classified as
+# non-speech. See voice_dictation/README.md "Tuning" section.
+VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
+
+# Window-gating thresholds: skip transcribing a window when its voiced content
+# falls below BOTH of these. Prevents Whisper hallucinations on near-silent
+# audio (e.g. "okay okay okay", "thank you thank you"). A window must have
+# at least MIN_VOICED_MS of voiced audio AND at least MIN_VOICED_FRAC of its
+# frames marked voiced to be transcribed.
+MIN_VOICED_FRAC = float(os.getenv("MIN_VOICED_FRAC", "0.15"))
+MIN_VOICED_MS = int(os.getenv("MIN_VOICED_MS", "300"))
 
 # Token format used for inline marker insertion in chunk_*.txt files.
 # Type-name capture group must match keys used by skill / session_writer.
@@ -70,6 +82,12 @@ DEFAULT_MARKERS = [
 # pick GPU. Override via env var if you want to force cpu or cuda.
 FW_MODEL = os.getenv("FW_MODEL", "small.en")
 FW_COMPUTE = os.getenv("FW_COMPUTE", "int8")
+
+# faster-whisper hallucination-mitigation thresholds. Defaults are tightened
+# vs. faster-whisper's own defaults (0.6 / -1.0) to drop low-confidence
+# decodes of near-silent audio. See voice_dictation/README.md "Tuning".
+FW_NO_SPEECH_THRESHOLD = float(os.getenv("FW_NO_SPEECH_THRESHOLD", "0.8"))
+FW_LOG_PROB_THRESHOLD = float(os.getenv("FW_LOG_PROB_THRESHOLD", "-0.8"))
 
 
 def _auto_detect_device() -> str:

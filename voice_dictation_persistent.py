@@ -52,10 +52,13 @@ from config import (
     FW_COMPUTE,
     FW_DEVICE,
     FW_MODEL,
+    MIN_VOICED_FRAC,
+    MIN_VOICED_MS,
     RECORDING_MARKER_TYPE,
     SAMPLE_RATE,
     SILENCE_MS,
     TRANSCRIPT_STREAM_PORT,
+    VAD_AGGRESSIVENESS,
 )
 from transcript_stream_server import TranscriptStreamServer
 from hotkeys import BareDoubleTap, key_char, load_config
@@ -165,7 +168,7 @@ class PersistentApp:
     # ------------------------------------------------------------------
 
     def _aggregator_loop(self) -> None:
-        vad = SilenceDetector(silence_ms=SILENCE_MS, aggressiveness=2)
+        vad = SilenceDetector(silence_ms=SILENCE_MS, aggressiveness=VAD_AGGRESSIVENESS)
         window_pcm = bytearray()
         window_start: Optional[float] = None
         window_end: float = 0.0
@@ -174,6 +177,24 @@ class PersistentApp:
         def flush_window(at_silence: bool) -> None:
             nonlocal window_pcm, window_start, window_end
             if not window_pcm or window_start is None:
+                window_pcm = bytearray()
+                window_start = None
+                window_end = 0.0
+                vad.reset_counts()
+                return
+            # Gate on voiced content: drop windows that are almost entirely
+            # silence. Both an absolute floor (MIN_VOICED_MS) and a fraction
+            # floor (MIN_VOICED_FRAC) must be cleared. This is the primary
+            # defense against Whisper hallucinations on near-silent audio.
+            voiced_ms = SilenceDetector.voiced_ms(vad.voiced_frames)
+            voiced_frac = (
+                vad.voiced_frames / vad.total_frames if vad.total_frames else 0.0
+            )
+            if voiced_ms < MIN_VOICED_MS or voiced_frac < MIN_VOICED_FRAC:
+                window_pcm = bytearray()
+                window_start = None
+                window_end = 0.0
+                vad.reset_counts()
                 return
             try:
                 self.window_q.put(
@@ -190,6 +211,7 @@ class PersistentApp:
             window_pcm = bytearray()
             window_start = None
             window_end = 0.0
+            vad.reset_counts()
 
         while not self._stop.is_set():
             try:
@@ -389,7 +411,8 @@ class PersistentApp:
         self.clipboard.copy_and_paste(text)
         preview = text[:80] + ("..." if len(text) > 80 else "")
         self._done(f"{window.label} pasted → [green]{preview}[/green]")
-        # Record for the widget paste log (most-recent-first when serialized).
+        # Record for the widget paste log (chronological — newest last so the
+        # UI can simply scroll to the bottom to show the tail).
         entry = {
             "ts": datetime.now().strftime("%H:%M:%S"),
             "label": window.label,
@@ -397,7 +420,7 @@ class PersistentApp:
             "full": text,
         }
         with self._state_lock:
-            self._paste_log.appendleft(entry)
+            self._paste_log.append(entry)
 
     def _cursor_time_at(self, monotonic_ts: float) -> float:
         """Estimate the session-relative time corresponding to a wall-clock press."""
@@ -480,7 +503,7 @@ class PersistentApp:
             "open_marker": open_marker,
             "open_marker_since": marker_open_since,
             "paste_log": paste_log,
-            "transcript_tail": self.writer.tail(500),
+            "transcript_tail": self.writer.tail(2000),
         }
 
     def _on_press(self, key) -> None:

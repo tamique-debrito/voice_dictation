@@ -97,7 +97,27 @@ _INDEX_HTML = """<!doctype html>
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
   }
+  section > h2:hover { color: var(--fg); }
+  section > h2 .chev {
+    display: inline-block;
+    width: 1em;
+    text-align: center;
+    font-size: 10px;
+    transition: transform 0.12s;
+  }
+  section[data-state="expanded"] > h2 .chev { transform: rotate(90deg); }
+  section .body {
+    overflow-y: auto;
+    transition: max-height 0.15s ease-out;
+  }
+  section[data-state="collapsed"] .body { max-height: 100px; }
+  section[data-state="expanded"]  .body { max-height: 500px; }
   .empty { padding: 16px; color: var(--muted); font-style: italic; }
 
   table.pastes { width: 100%; border-collapse: collapse; }
@@ -122,8 +142,6 @@ _INDEX_HTML = """<!doctype html>
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 280px;
-    overflow-y: auto;
   }
   .marker-pill {
     display: inline-block;
@@ -152,13 +170,15 @@ _INDEX_HTML = """<!doctype html>
 </header>
 <div id="disconnected">⚠ disconnected from monitoring service</div>
 <main>
-  <section>
-    <h2>Paste log</h2>
-    <div id="pastes-wrap"><div class="empty">no pastes yet</div></div>
+  <section id="pastes-section" class="collapsible" data-state="collapsed">
+    <h2><span class="chev">▸</span>Paste log</h2>
+    <div class="body" id="pastes-body"><div class="empty">no pastes yet</div></div>
   </section>
-  <section>
-    <h2>Transcript (tail)</h2>
-    <div id="transcript" class="empty">no audio yet</div>
+  <section id="transcript-section" class="collapsible" data-state="collapsed">
+    <h2><span class="chev">▸</span>Transcript (tail)</h2>
+    <div class="body" id="transcript-body">
+      <div id="transcript" class="empty">no audio yet</div>
+    </div>
   </section>
 </main>
 <script>
@@ -168,30 +188,66 @@ _INDEX_HTML = """<!doctype html>
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const MARKER_RE = /&lt;&lt;&lt;MARKER:([a-z_]+):(start|end)&gt;&gt;&gt;/g;
 
+  // Wire up collapse toggles. Both sections default to "collapsed" via HTML.
+  document.querySelectorAll('section.collapsible').forEach(sec => {
+    sec.querySelector('h2').addEventListener('click', () => {
+      const next = sec.dataset.state === 'expanded' ? 'collapsed' : 'expanded';
+      sec.dataset.state = next;
+      // After the state flip the inner area resizes; re-pin to bottom so the
+      // tail stays visible.
+      const body = sec.querySelector('.body');
+      requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+    });
+  });
+
+  // For each scroll container, remember whether the user manually scrolled
+  // away from the bottom. If they're at the bottom, we keep pinning; if
+  // they've scrolled up to read, we leave them alone.
+  const scrollState = new WeakMap();
+  function attachScrollWatcher(body) {
+    if (scrollState.has(body)) return;
+    scrollState.set(body, { atBottom: true });
+    body.addEventListener('scroll', () => {
+      const slack = 8;
+      const atBottom = (body.scrollHeight - body.clientHeight) <= (body.scrollTop + slack);
+      scrollState.get(body).atBottom = atBottom;
+    });
+  }
+  function pinToBottomIfStuck(body) {
+    const state = scrollState.get(body);
+    if (!state || state.atBottom) {
+      body.scrollTop = body.scrollHeight;
+    }
+  }
+
   function renderTranscript(text) {
     const el = $('transcript');
+    const body = $('transcript-body');
+    attachScrollWatcher(body);
     if (!text) {
       el.className = 'empty';
       el.textContent = 'no audio yet';
       return;
     }
     el.className = '';
-    const wasAtBottom = (el.scrollHeight - el.clientHeight) <= (el.scrollTop + 8);
     const escaped = escape(text);
     const html = escaped.replace(MARKER_RE, (m, type, kind) => {
       const cls = ['marker-pill', type].join(' ');
       return `<span class="${cls}" title="${type}:${kind}">${type}:${kind}</span>`;
     });
     el.innerHTML = html;
-    if (wasAtBottom) el.scrollTop = el.scrollHeight;
+    pinToBottomIfStuck(body);
   }
 
   function renderPastes(pastes) {
-    const wrap = $('pastes-wrap');
+    const body = $('pastes-body');
+    attachScrollWatcher(body);
     if (!pastes || pastes.length === 0) {
-      wrap.innerHTML = '<div class="empty">no pastes yet</div>';
+      body.innerHTML = '<div class="empty">no pastes yet</div>';
       return;
     }
+    // Server sends chronological (oldest first, newest last). Render as-is
+    // so the tail is at the bottom of the scrolling region.
     const rows = pastes.map(p => {
       const labelCls = p.label === 'r' ? 'r' : 'aside';
       return `<tr title="${escape(p.full || '')}">` +
@@ -200,7 +256,8 @@ _INDEX_HTML = """<!doctype html>
              `<td class="preview">${escape(p.preview)}</td>` +
              `</tr>`;
     }).join('');
-    wrap.innerHTML = `<table class="pastes"><tbody>${rows}</tbody></table>`;
+    body.innerHTML = `<table class="pastes"><tbody>${rows}</tbody></table>`;
+    pinToBottomIfStuck(body);
   }
 
   function renderHeader(s) {
