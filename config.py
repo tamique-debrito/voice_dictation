@@ -27,7 +27,8 @@ TRANSCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "transcripts")
 
 # Approximate target tokens per chunk file (~0.75 tokens per English word).
 # Cuts only happen at silence boundaries, so chunks may exceed this slightly.
-CHUNK_TOKEN_TARGET = 10000
+# ~2000 tokens ≈ ~1500 words ≈ ~10 min of speech.
+CHUNK_TOKEN_TARGET = 2000
 
 # Minimum continuous silence (ms) considered a "boundary" for chunk flushing
 # and transcription window alignment.
@@ -42,6 +43,13 @@ def marker_start(type_name: str) -> str:
 
 def marker_end(type_name: str) -> str:
     return f"<<<MARKER:{type_name}:end>>>"
+
+# Built-in marker types for recording/aside clipboard windows. These are
+# kept separate from user-configurable DEFAULT_MARKERS because they're
+# part of the core capture machinery, not user-configurable annotations.
+# Format is the same so downstream parsers can recognize them uniformly.
+RECORDING_MARKER_TYPE = "recording"
+ASIDE_MARKER_TYPE = "aside"
 
 # Default marker types when local_config.json doesn't specify them.
 DEFAULT_MARKERS = [

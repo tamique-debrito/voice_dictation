@@ -42,34 +42,46 @@ def _approx_word_count(text: str) -> int:
     return len(text.split())
 
 
-def _strip_annotation_spans(text: str) -> str:
-    """Remove ``<<<MARKER:type:start>>> ... <<<MARKER:type:end>>>`` ranges in full.
+def _strip_markers(text: str, strip_span_types: set[str]) -> str:
+    """Remove marker tokens from ``text`` according to ``strip_span_types``.
 
-    Markers and the speech between them are deleted. An unclosed start marker
-    in the input strips from the marker to the end of ``text``. Adjacent
-    surrounding pieces are joined with a single space so word boundaries are
-    preserved.
+    * For types listed in ``strip_span_types``: remove the entire span — start
+      token, end token, and everything between (and the matching unclosed
+      tail if there is no end token).
+    * For all other marker types: remove only the token text; the surrounding
+      content is preserved. This is how we treat the built-in recording /
+      aside markers — they bracket content the user wants pasted, so the
+      content stays but the literal token strings are scrubbed.
+
+    Adjacent surviving pieces are joined with a single space so word
+    boundaries are preserved.
     """
     pieces: list[str] = []
     i = 0
+    in_strip_type: Optional[str] = None
     while i < len(text):
         m = _MARKER_RE.search(text, i)
-        if not m:
-            pieces.append(text[i:])
+        if m is None:
+            if in_strip_type is None:
+                pieces.append(text[i:])
+            # else: unclosed strip span — drop trailing content.
             break
-        pieces.append(text[i:m.start()])
-        if m.group(2) == "end":
-            # Stray end without a matching start — drop just the token.
+        if in_strip_type is None:
+            pieces.append(text[i:m.start()])
+        type_name = m.group(1)
+        kind = m.group(2)
+        if in_strip_type is not None:
+            # Inside a fully-stripped span: only exit on matching end token;
+            # otherwise swallow everything (including unrelated markers).
+            if kind == "end" and type_name == in_strip_type:
+                in_strip_type = None
             i = m.end()
             continue
-        type_name = m.group(1)
-        end_re = re.compile(r"<<<MARKER:" + re.escape(type_name) + r":end>>>")
-        em = end_re.search(text, m.end())
-        if not em:
-            # Unclosed start — drop everything from the start token onward.
-            break
-        i = em.end()
-    # Join pieces with whitespace collapsed to single spaces around the seams.
+        # Not inside a strip span.
+        if kind == "start" and type_name in strip_span_types:
+            in_strip_type = type_name
+        # Other cases (token-only types, stray ends, etc.) just drop the token.
+        i = m.end()
     return re.sub(r"\s+", " ", " ".join(p.strip() for p in pieces if p.strip())).strip()
 
 
@@ -166,6 +178,32 @@ class SessionWriter:
             self._buffer += " "
         self._buffer += token
 
+    def append_marker(self, type_name: str, kind: str) -> None:
+        """Public append for built-in markers (recording, aside) that
+        don't go through the no-overlap state machine in ``insert_marker``.
+        ``kind`` is ``"start"`` or ``"end"``."""
+        token = marker_start(type_name) if kind == "start" else marker_end(type_name)
+        with self._lock:
+            self._append_token(token)
+
+    def remove_last_marker(self, type_name: str, kind: str) -> bool:
+        """Find and remove the last occurrence of a specific marker token
+        from the buffer. Used to scrub an unfinished recording/aside marker
+        when the user cancels. Returns True if a token was found and removed.
+        """
+        token = marker_start(type_name) if kind == "start" else marker_end(type_name)
+        with self._lock:
+            idx = self._buffer.rfind(token)
+            if idx == -1:
+                return False
+            before = self._buffer[:idx]
+            after = self._buffer[idx + len(token):]
+            # Collapse the doubled space that would otherwise be left behind.
+            if before.endswith(" ") and after.startswith(" "):
+                after = after.lstrip(" ")
+            self._buffer = before + after
+            return True
+
     def open_marker_type(self) -> Optional[str]:
         with self._lock:
             return self._open_marker_type
@@ -185,13 +223,27 @@ class SessionWriter:
                 end = len(self._buffer)
             return self._buffer[start:end]
 
-    def slice_for_paste(self, start: int, end: Optional[int] = None) -> str:
-        """Slice with full annotation spans (markers + content) removed.
+    def slice_for_paste(
+        self,
+        start: int,
+        end: Optional[int] = None,
+        strip_span_types: Optional[set[str]] = None,
+    ) -> str:
+        """Slice with annotation spans removed and built-in marker tokens scrubbed.
 
-        Used by clipboard-window pastes.
+        ``strip_span_types`` is the set of marker types whose full spans
+        (markers + content) should be removed — typically the user-configured
+        annotation types. Markers of other types (e.g. the built-in
+        ``recording`` / ``aside`` ones) have only their token strings removed;
+        the content they bracket is preserved.
+
+        If ``strip_span_types`` is None, the writer's own configured marker
+        types are used.
         """
         raw = self.slice_buffer(start, end)
-        return _strip_annotation_spans(raw)
+        if strip_span_types is None:
+            strip_span_types = set(self.marker_types.keys())
+        return _strip_markers(raw, strip_span_types)
 
     # ------------------------------------------------------------------
     # Chunk flushing

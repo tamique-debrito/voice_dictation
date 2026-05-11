@@ -44,11 +44,13 @@ from rich.panel import Panel
 
 from clipboard_manager import ClipboardManager
 from config import (
+    ASIDE_MARKER_TYPE,
     CHUNK_TOKEN_TARGET,
     DEFAULT_MARKERS,
     FW_COMPUTE,
     FW_DEVICE,
     FW_MODEL,
+    RECORDING_MARKER_TYPE,
     SAMPLE_RATE,
     SILENCE_MS,
 )
@@ -293,11 +295,14 @@ class PersistentApp:
                         style="yellow",
                     )
                     return
+                # Emit recording-start marker into the transcript.
+                self.writer.append_marker(RECORDING_MARKER_TYPE, "start")
                 cursor = self.writer.cursor()
                 self._r_window = _ClipboardWindow("r", cursor, time.monotonic())
                 self._done("started r capture")
             else:
-                # End r: drain transcriber, then paste in background thread.
+                # End r: emit recording-end marker, drain, then paste.
+                self.writer.append_marker(RECORDING_MARKER_TYPE, "end")
                 self._r_window.end_press_time = time.monotonic()
                 window = self._r_window
                 self._r_window = None
@@ -308,12 +313,14 @@ class PersistentApp:
     def _toggle_aside(self) -> None:
         with self._state_lock:
             if self._aside_window is None:
+                self.writer.append_marker(ASIDE_MARKER_TYPE, "start")
                 cursor = self.writer.cursor()
                 if self._r_window is not None:
                     self._r_window.park(cursor)
                 self._aside_window = _ClipboardWindow("aside", cursor, time.monotonic())
                 self._done("started aside capture")
             else:
+                self.writer.append_marker(ASIDE_MARKER_TYPE, "end")
                 self._aside_window.end_press_time = time.monotonic()
                 window = self._aside_window
                 self._aside_window = None
@@ -326,12 +333,16 @@ class PersistentApp:
     def _cancel_window(self) -> None:
         with self._state_lock:
             if self._aside_window is not None:
+                # Scrub the unfinished aside-start marker so the transcript
+                # doesn't show a recording event for a cancelled capture.
+                self.writer.remove_last_marker(ASIDE_MARKER_TYPE, "start")
                 self._aside_window = None
                 if self._r_window is not None:
                     self._r_window.resume(self.writer.cursor())
                 self._done("aside cancelled (r resumed)" if self._r_window else "aside cancelled")
                 return
             if self._r_window is not None:
+                self.writer.remove_last_marker(RECORDING_MARKER_TYPE, "start")
                 self._r_window = None
                 self._done("r capture cancelled")
                 return
