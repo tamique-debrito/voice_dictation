@@ -26,7 +26,14 @@ except ImportError as e:  # pragma: no cover - runtime dependency
 else:
     _IMPORT_ERROR = None
 
-from config import FW_COMPUTE, FW_DEVICE, FW_MODEL, SAMPLE_RATE
+from config import (
+    FW_COMPUTE,
+    FW_DEVICE,
+    FW_LOG_PROB_THRESHOLD,
+    FW_MODEL,
+    FW_NO_SPEECH_THRESHOLD,
+    SAMPLE_RATE,
+)
 
 
 @dataclass
@@ -106,12 +113,19 @@ class StreamingTranscriber:
         # vad_filter=False — we already gate on silence at the aggregator
         # level, and keeping faster-whisper's own VAD off avoids it dropping
         # short utterances.
+        # no_speech_threshold + log_prob_threshold tighten faster-whisper's
+        # own rejection of low-confidence decodes, suppressing hallucinations
+        # like "okay okay okay" / "thank you thank you" on near-silent audio.
+        # compression_ratio_threshold stays at the default 2.4 (catches
+        # degenerate repetition loops).
         segments, _info = self._model.transcribe(
             audio,
             language="en",
             beam_size=1,
             vad_filter=False,
             condition_on_previous_text=False,
+            no_speech_threshold=FW_NO_SPEECH_THRESHOLD,
+            log_prob_threshold=FW_LOG_PROB_THRESHOLD,
         )
         window_duration = win.end_time - win.start_time
         for seg in segments:

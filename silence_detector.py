@@ -44,6 +44,19 @@ class SilenceDetector:
         self._buf = bytearray()
         self._silent_run = 0
         self._armed = False  # only fire a boundary after at least one voiced frame
+        # Per-window frame counters. Reset by the caller via reset_counts()
+        # after consuming each window so it can gate transcription on the
+        # fraction/duration of voiced audio in that window.
+        self.voiced_frames = 0
+        self.total_frames = 0
+
+    def reset_counts(self) -> None:
+        self.voiced_frames = 0
+        self.total_frames = 0
+
+    @staticmethod
+    def voiced_ms(voiced_frames: int) -> int:
+        return voiced_frames * VAD_FRAME_MS
 
     def feed(self, pcm: bytes) -> Iterator[str]:
         """Feed raw int16 PCM bytes; yield 'boundary' on each silence edge."""
@@ -55,7 +68,9 @@ class SilenceDetector:
                 voiced = self._vad.is_speech(frame, SAMPLE_RATE)
             except Exception:
                 voiced = False
+            self.total_frames += 1
             if voiced:
+                self.voiced_frames += 1
                 self._silent_run = 0
                 self._armed = True
             else:

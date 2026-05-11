@@ -52,10 +52,13 @@ from config import (
     FW_COMPUTE,
     FW_DEVICE,
     FW_MODEL,
+    MIN_VOICED_FRAC,
+    MIN_VOICED_MS,
     RECORDING_MARKER_TYPE,
     SAMPLE_RATE,
     SILENCE_MS,
     TRANSCRIPT_STREAM_PORT,
+    VAD_AGGRESSIVENESS,
 )
 from transcript_stream_server import TranscriptStreamServer
 from hotkeys import BareDoubleTap, key_char, load_config
@@ -152,8 +155,12 @@ class PersistentApp:
         # Wall-clock HH:MM:SS string of when the currently-open marker opened.
         self._marker_open_since: Optional[str] = None
 
+        # Mute toggle: when set, the aggregator drains raw audio without
+        # feeding it to VAD/transcription. Toggled by double-tap `m`.
+        self._muted = threading.Event()
+
         # Bare double-tap dispatcher
-        keys = set(self._marker_keys) | {"r", "a", "x", "q"}
+        keys = set(self._marker_keys) | {"r", "a", "x", "q", "m"}
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
 
         # Used to undo the two visible keypresses in whichever app currently
@@ -165,7 +172,7 @@ class PersistentApp:
     # ------------------------------------------------------------------
 
     def _aggregator_loop(self) -> None:
-        vad = SilenceDetector(silence_ms=SILENCE_MS, aggressiveness=2)
+        vad = SilenceDetector(silence_ms=SILENCE_MS, aggressiveness=VAD_AGGRESSIVENESS)
         window_pcm = bytearray()
         window_start: Optional[float] = None
         window_end: float = 0.0
@@ -174,6 +181,24 @@ class PersistentApp:
         def flush_window(at_silence: bool) -> None:
             nonlocal window_pcm, window_start, window_end
             if not window_pcm or window_start is None:
+                window_pcm = bytearray()
+                window_start = None
+                window_end = 0.0
+                vad.reset_counts()
+                return
+            # Gate on voiced content: drop windows that are almost entirely
+            # silence. Both an absolute floor (MIN_VOICED_MS) and a fraction
+            # floor (MIN_VOICED_FRAC) must be cleared. This is the primary
+            # defense against Whisper hallucinations on near-silent audio.
+            voiced_ms = SilenceDetector.voiced_ms(vad.voiced_frames)
+            voiced_frac = (
+                vad.voiced_frames / vad.total_frames if vad.total_frames else 0.0
+            )
+            if voiced_ms < MIN_VOICED_MS or voiced_frac < MIN_VOICED_FRAC:
+                window_pcm = bytearray()
+                window_start = None
+                window_end = 0.0
+                vad.reset_counts()
                 return
             try:
                 self.window_q.put(
@@ -190,6 +215,7 @@ class PersistentApp:
             window_pcm = bytearray()
             window_start = None
             window_end = 0.0
+            vad.reset_counts()
 
         while not self._stop.is_set():
             try:
@@ -197,6 +223,18 @@ class PersistentApp:
             except queue.Empty:
                 # No audio for a moment — try a chunk flush opportunistically.
                 self._maybe_flush_chunk(at_silence_boundary=False)
+                continue
+
+            if self._muted.is_set():
+                # Drop the chunk and discard any in-progress window so we
+                # don't flush a partial utterance straddling the mute edge.
+                # VAD state is reset too, so re-arming only happens after
+                # fresh voiced audio post-unmute.
+                if window_pcm:
+                    window_pcm = bytearray()
+                    window_start = None
+                    window_end = 0.0
+                    vad.reset_counts()
                 continue
 
             if window_start is None:
@@ -287,6 +325,9 @@ class PersistentApp:
         elif char == "x":
             self._ack("cancel (x)")
             self._cancel_window()
+        elif char == "m":
+            self._ack("mute toggle (m)")
+            self._toggle_mute()
         elif char == "q":
             self._ack("quit (q)")
             self._stop.set()
@@ -325,9 +366,14 @@ class PersistentApp:
                 self._r_window = _ClipboardWindow("r", cursor, time.monotonic())
                 self._done("started r capture")
             else:
-                # End r: emit recording-end marker, drain, then paste.
-                self.writer.append_marker(RECORDING_MARKER_TYPE, "end")
-                self._r_window.end_press_time = time.monotonic()
+                # End r: defer marker insertion until transcription has
+                # caught up to the press moment, so the token lands AFTER
+                # any in-flight segments whose audio precedes the press.
+                press_ts = time.monotonic()
+                self.writer.schedule_marker(
+                    RECORDING_MARKER_TYPE, "end", self._cursor_time_at(press_ts)
+                )
+                self._r_window.end_press_time = press_ts
                 window = self._r_window
                 self._r_window = None
                 threading.Thread(
@@ -353,6 +399,14 @@ class PersistentApp:
                 threading.Thread(
                     target=self._finish_paste, args=(window,), daemon=True
                 ).start()
+
+    def _toggle_mute(self) -> None:
+        if self._muted.is_set():
+            self._muted.clear()
+            self._done("unmuted — transcription resumed")
+        else:
+            self._muted.set()
+            self._done("muted — transcription paused", style="bold yellow")
 
     def _cancel_window(self) -> None:
         with self._state_lock:
@@ -389,7 +443,8 @@ class PersistentApp:
         self.clipboard.copy_and_paste(text)
         preview = text[:80] + ("..." if len(text) > 80 else "")
         self._done(f"{window.label} pasted → [green]{preview}[/green]")
-        # Record for the widget paste log (most-recent-first when serialized).
+        # Record for the widget paste log (chronological — newest last so the
+        # UI can simply scroll to the bottom to show the tail).
         entry = {
             "ts": datetime.now().strftime("%H:%M:%S"),
             "label": window.label,
@@ -397,7 +452,7 @@ class PersistentApp:
             "full": text,
         }
         with self._state_lock:
-            self._paste_log.appendleft(entry)
+            self._paste_log.append(entry)
 
     def _cursor_time_at(self, monotonic_ts: float) -> float:
         """Estimate the session-relative time corresponding to a wall-clock press."""
@@ -476,11 +531,12 @@ class PersistentApp:
                 "mode": mode,
                 "r_active": r_active,
                 "aside_active": aside_active,
+                "muted": self._muted.is_set(),
             },
             "open_marker": open_marker,
             "open_marker_since": marker_open_since,
             "paste_log": paste_log,
-            "transcript_tail": self.writer.tail(500),
+            "transcript_tail": self.writer.tail(2000),
         }
 
     def _on_press(self, key) -> None:
