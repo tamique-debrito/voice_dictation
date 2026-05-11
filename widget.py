@@ -46,7 +46,7 @@ _INDEX_HTML = """<!doctype html>
   }
   header {
     display: grid;
-    grid-template-columns: 1fr auto auto auto;
+    grid-template-columns: 1fr auto auto auto auto;
     gap: 16px;
     align-items: center;
     padding: 10px 16px;
@@ -73,6 +73,9 @@ _INDEX_HTML = """<!doctype html>
   .pill.r-aside { background: linear-gradient(90deg, var(--r-active) 50%, var(--aside-active) 50%); color: #1b1d23; }
   .pill.marker  { background: var(--marker); color: #1b1d23; }
   .pill.none    { background: transparent; color: var(--muted); border: 1px dashed #4a4d55; }
+  .pill.muted   { background: #e7c84a; color: #1b1d23; font-weight: 700; letter-spacing: 0.05em; }
+  body.is-muted { box-shadow: inset 0 0 0 3px #e7c84a; }
+  body.is-muted header { background: #3a341a; }
 
   #disconnected {
     display: none;
@@ -166,6 +169,7 @@ _INDEX_HTML = """<!doctype html>
   </div>
   <div>capture: <span id="capture" class="pill passive">passive</span></div>
   <div>marker:  <span id="marker" class="pill none">none</span></div>
+  <div><span id="mute" class="pill muted" style="display:none">MUTED</span></div>
   <div class="meta" id="uptime"></div>
 </header>
 <div id="disconnected">⚠ disconnected from monitoring service</div>
@@ -266,6 +270,9 @@ _INDEX_HTML = """<!doctype html>
     const cap = $('capture');
     cap.textContent = s.capture.mode;
     cap.className = 'pill ' + (s.capture.mode === 'r+aside' ? 'r-aside' : s.capture.mode);
+    const muted = !!(s.capture && s.capture.muted);
+    $('mute').style.display = muted ? '' : 'none';
+    document.body.classList.toggle('is-muted', muted);
     const m = $('marker');
     if (s.open_marker) {
       m.textContent = s.open_marker + (s.open_marker_since ? ` (since ${s.open_marker_since})` : '');

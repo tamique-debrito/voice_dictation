@@ -9,6 +9,7 @@ All hotkeys are double-tap (press twice within 1 second) while holding the platf
 - **R** — Toggle recording. Second toggle stops, transcribes, and pastes.
 - **X** — Discard the active recording without transcribing.
 - **A** — Aside: pause the main recording, record an aside, transcribe and paste it, then resume the main recording where it left off.
+- **M** — Mute toggle (persistent mode only). When muted, incoming audio is dropped before transcription; toggle again to resume.
 
 ## Transcription providers
 

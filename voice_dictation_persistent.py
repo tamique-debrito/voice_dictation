@@ -155,8 +155,12 @@ class PersistentApp:
         # Wall-clock HH:MM:SS string of when the currently-open marker opened.
         self._marker_open_since: Optional[str] = None
 
+        # Mute toggle: when set, the aggregator drains raw audio without
+        # feeding it to VAD/transcription. Toggled by double-tap `m`.
+        self._muted = threading.Event()
+
         # Bare double-tap dispatcher
-        keys = set(self._marker_keys) | {"r", "a", "x", "q"}
+        keys = set(self._marker_keys) | {"r", "a", "x", "q", "m"}
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
 
         # Used to undo the two visible keypresses in whichever app currently
@@ -219,6 +223,18 @@ class PersistentApp:
             except queue.Empty:
                 # No audio for a moment — try a chunk flush opportunistically.
                 self._maybe_flush_chunk(at_silence_boundary=False)
+                continue
+
+            if self._muted.is_set():
+                # Drop the chunk and discard any in-progress window so we
+                # don't flush a partial utterance straddling the mute edge.
+                # VAD state is reset too, so re-arming only happens after
+                # fresh voiced audio post-unmute.
+                if window_pcm:
+                    window_pcm = bytearray()
+                    window_start = None
+                    window_end = 0.0
+                    vad.reset_counts()
                 continue
 
             if window_start is None:
@@ -309,6 +325,9 @@ class PersistentApp:
         elif char == "x":
             self._ack("cancel (x)")
             self._cancel_window()
+        elif char == "m":
+            self._ack("mute toggle (m)")
+            self._toggle_mute()
         elif char == "q":
             self._ack("quit (q)")
             self._stop.set()
@@ -380,6 +399,14 @@ class PersistentApp:
                 threading.Thread(
                     target=self._finish_paste, args=(window,), daemon=True
                 ).start()
+
+    def _toggle_mute(self) -> None:
+        if self._muted.is_set():
+            self._muted.clear()
+            self._done("unmuted — transcription resumed")
+        else:
+            self._muted.set()
+            self._done("muted — transcription paused", style="bold yellow")
 
     def _cancel_window(self) -> None:
         with self._state_lock:
@@ -504,6 +531,7 @@ class PersistentApp:
                 "mode": mode,
                 "r_active": r_active,
                 "aside_active": aside_active,
+                "muted": self._muted.is_set(),
             },
             "open_marker": open_marker,
             "open_marker_since": marker_open_since,
