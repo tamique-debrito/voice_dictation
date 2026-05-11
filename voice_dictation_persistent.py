@@ -347,9 +347,14 @@ class PersistentApp:
                 self._r_window = _ClipboardWindow("r", cursor, time.monotonic())
                 self._done("started r capture")
             else:
-                # End r: emit recording-end marker, drain, then paste.
-                self.writer.append_marker(RECORDING_MARKER_TYPE, "end")
-                self._r_window.end_press_time = time.monotonic()
+                # End r: defer marker insertion until transcription has
+                # caught up to the press moment, so the token lands AFTER
+                # any in-flight segments whose audio precedes the press.
+                press_ts = time.monotonic()
+                self.writer.schedule_marker(
+                    RECORDING_MARKER_TYPE, "end", self._cursor_time_at(press_ts)
+                )
+                self._r_window.end_press_time = press_ts
                 window = self._r_window
                 self._r_window = None
                 threading.Thread(

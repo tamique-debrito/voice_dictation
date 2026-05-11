@@ -57,11 +57,11 @@ The always-on persistent app (`voice_dictation_persistent.py`) can occasionally 
 | Knob | Default | What it controls |
 |------|---------|------------------|
 | `SILENCE_MS` | 500 | Continuous silence (ms) that triggers a window flush boundary. Raise to require longer pauses before transcribing. |
-| `VAD_AGGRESSIVENESS` | 2 | webrtcvad level (0–3). Higher = more frames classified as non-speech. Raise to 3 if silence isn't being detected and hallucinations persist. |
-| `MIN_VOICED_FRAC` | 0.15 | Minimum fraction of voiced frames in a window for it to be transcribed. Raise to drop more low-content windows; lower if real short utterances are being suppressed. |
-| `MIN_VOICED_MS` | 300 | Absolute minimum voiced audio (ms) per window. Independent of fraction — protects against single-blip windows. Both this and `MIN_VOICED_FRAC` must be met for a window to be transcribed. |
-| `FW_NO_SPEECH_THRESHOLD` | 0.8 | faster-whisper no-speech probability cutoff (its default is 0.6). Raise toward 1.0 to discard more low-confidence segments. |
-| `FW_LOG_PROB_THRESHOLD` | -0.8 | faster-whisper avg-log-prob cutoff (its default is -1.0). Raise toward 0 to require higher-confidence decodes. |
+| `VAD_AGGRESSIVENESS` | 3 | webrtcvad level (0–3). Higher = more frames classified as non-speech. Lower to 2 if real speech is being clipped. |
+| `MIN_VOICED_FRAC` | 0.25 | Minimum fraction of voiced frames in a window for it to be transcribed. Raise to drop more low-content windows; lower if real short utterances are being suppressed. |
+| `MIN_VOICED_MS` | 500 | Absolute minimum voiced audio (ms) per window. Independent of fraction — protects against single-blip windows. Both this and `MIN_VOICED_FRAC` must be met for a window to be transcribed. |
+| `FW_NO_SPEECH_THRESHOLD` | 0.9 | faster-whisper no-speech probability cutoff (its default is 0.6). Raise toward 1.0 to discard more low-confidence segments; lower if real speech is being dropped. |
+| `FW_LOG_PROB_THRESHOLD` | -0.5 | faster-whisper avg-log-prob cutoff (its default is -1.0). Raise toward 0 to require higher-confidence decodes. |
 | `FW_MODEL` | `small.en` | faster-whisper model name. Options include `tiny.en`, `base.en`, `small.en`, `medium.en`. |
 | `FW_COMPUTE` | `int8` | CTranslate2 quantization (`int8`, `int16`, `float16`, `float32`). |
 | `FW_DEVICE` | auto | `cpu` or `cuda`. Auto-detects CUDA; macOS always falls back to CPU. |

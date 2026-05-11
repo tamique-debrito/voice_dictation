@@ -117,6 +117,12 @@ class SessionWriter:
         # Position in ``self._buffer`` at which the current chunk started.
         # On flush, [_chunk_start_in_buffer..len(buffer)] is what we write.
         self._chunk_start_in_buffer = 0
+        # Markers waiting for transcription to catch up to a given audio
+        # timestamp before being inserted. Used for recording-end so the
+        # token lands AFTER any in-flight segments whose audio precedes the
+        # press, instead of at the cursor as of press time. See
+        # ``schedule_marker``.
+        self._pending_markers: list[tuple[float, str]] = []
 
         self._started_at = datetime.now(tz=timezone.utc)
         self._ended_at: Optional[datetime] = None
@@ -131,6 +137,10 @@ class SessionWriter:
         ``end_time`` is the session-relative end of the segment. It's used by
         clipboard-window flush to know when the transcriber has caught up to
         a given hotkey-press timestamp.
+
+        After appending the segment, any pending markers whose audio
+        threshold has now been overshot are flushed so they land AFTER the
+        segment that spans the press moment.
         """
         if not text:
             return
@@ -139,6 +149,14 @@ class SessionWriter:
                 self._buffer += " "
             self._buffer += text
             self._latest_segment_end = end_time
+            if self._pending_markers:
+                still_pending: list[tuple[float, str]] = []
+                for audio_time, token in self._pending_markers:
+                    if audio_time <= end_time:
+                        self._append_token(token)
+                    else:
+                        still_pending.append((audio_time, token))
+                self._pending_markers = still_pending
 
     def latest_segment_end(self) -> float:
         with self._lock:
@@ -185,6 +203,19 @@ class SessionWriter:
         token = marker_start(type_name) if kind == "start" else marker_end(type_name)
         with self._lock:
             self._append_token(token)
+
+    def schedule_marker(self, type_name: str, kind: str, audio_time: float) -> None:
+        """Queue a marker to be inserted once transcription reaches ``audio_time``.
+
+        Used for ``recording:end`` so the token lands AFTER any in-flight
+        segments whose audio precedes the press. The marker is appended by
+        ``feed_segment`` the first time a segment arrives whose ``end_time``
+        meets or exceeds ``audio_time``. If the session ends with markers
+        still pending, ``force_flush`` drains them.
+        """
+        token = marker_start(type_name) if kind == "start" else marker_end(type_name)
+        with self._lock:
+            self._pending_markers.append((audio_time, token))
 
     def remove_last_marker(self, type_name: str, kind: str) -> bool:
         """Find and remove the last occurrence of a specific marker token
@@ -275,6 +306,12 @@ class SessionWriter:
     def force_flush(self) -> Optional[str]:
         """Flush whatever is pending regardless of size. Used on shutdown."""
         with self._lock:
+            # Drain any markers still waiting for transcription to catch up
+            # so they don't get lost on shutdown.
+            if self._pending_markers:
+                for _audio_time, token in self._pending_markers:
+                    self._append_token(token)
+                self._pending_markers = []
             pending = self._buffer[self._chunk_start_in_buffer:]
             if not pending.strip():
                 return None
