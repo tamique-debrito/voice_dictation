@@ -124,6 +124,11 @@ class BareDoubleTap:
     the same key is pressed twice within ``window`` seconds, with no other
     relevant key pressed in between.
 
+    ``quiet_before`` adds a typing-guard: if any untracked key was pressed
+    within that many seconds before the first tap, the double-tap is suppressed.
+    This prevents accidental triggers when the hotkey key appears at the end of
+    normal typing (e.g. "…text r" then pressing r again quickly).
+
     Usage::
 
         tap = BareDoubleTap(window=1.0, keys={"r", "1", "q"},
@@ -140,11 +145,14 @@ class BareDoubleTap:
         window: float,
         keys: set[str],
         on_double_tap: Callable[[str], None],
+        quiet_before: float = 1.0,
     ):
         self.window = window
         self.keys = set(keys)
         self.on_double_tap = on_double_tap
+        self.quiet_before = quiet_before
         self._last_press: dict[str, float] = {}
+        self._last_untracked_time: float = 0.0
 
     def update_keys(self, keys: set[str]) -> None:
         """Replace the watched key set (used when marker config changes)."""
@@ -158,11 +166,11 @@ class BareDoubleTap:
         if char in self.keys:
             last = self._last_press.get(char, 0.0)
             if now - last <= self.window:
-                self._last_press[char] = 0.0
-                # Any pending double-tap state on *other* keys is invalidated:
-                # only one double-tap can fire per "burst".
                 self._last_press = {char: 0.0}
-                self.on_double_tap(char)
+                # Suppress if untracked typing happened within quiet_before of
+                # the first tap — guards against "...word r" + r firing.
+                if last - self._last_untracked_time >= self.quiet_before:
+                    self.on_double_tap(char)
             else:
                 self._last_press[char] = now
                 # Pressing a tracked key resets pending state on others.
@@ -172,5 +180,6 @@ class BareDoubleTap:
         else:
             # An untracked key inside an ordinary typing burst resets
             # all pending double-tap state.
+            self._last_untracked_time = now
             if self._last_press:
                 self._last_press.clear()
