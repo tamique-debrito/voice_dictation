@@ -45,11 +45,25 @@ class AudioWindow:
 
 
 @dataclass
+class Word:
+    """A single transcribed word with session-relative timing."""
+    text: str
+    start_time: float
+    end_time: float
+    probability: float
+
+
+@dataclass
 class Segment:
     """Transcribed text covering ``start_time``..``end_time``."""
     text: str
     start_time: float
     end_time: float
+    words: list["Word"] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.words is None:
+            self.words = []
 
 
 class StreamingTranscriber:
@@ -126,8 +140,10 @@ class StreamingTranscriber:
             condition_on_previous_text=False,
             no_speech_threshold=FW_NO_SPEECH_THRESHOLD,
             log_prob_threshold=FW_LOG_PROB_THRESHOLD,
+            word_timestamps=True,
         )
         window_duration = win.end_time - win.start_time
+        window_end_abs = win.start_time + window_duration
         for seg in segments:
             text = seg.text.strip()
             if not text:
@@ -135,10 +151,20 @@ class StreamingTranscriber:
             # Map per-segment relative timing into session-relative timing.
             # faster-whisper returns times relative to the audio it received.
             t0 = win.start_time + float(seg.start)
-            t1 = win.start_time + float(seg.end)
-            # Clamp in case of any drift past the window edge.
-            t1 = min(t1, win.start_time + window_duration)
-            self.out_queue.put(Segment(text=text, start_time=t0, end_time=t1))
+            t1 = min(win.start_time + float(seg.end), window_end_abs)
+            words: list[Word] = []
+            for w in (getattr(seg, "words", None) or []):
+                w_start = win.start_time + float(w.start)
+                w_end = min(win.start_time + float(w.end), window_end_abs)
+                words.append(Word(
+                    text=w.word,
+                    start_time=w_start,
+                    end_time=w_end,
+                    probability=float(getattr(w, "probability", 0.0) or 0.0),
+                ))
+            self.out_queue.put(Segment(
+                text=text, start_time=t0, end_time=t1, words=words
+            ))
 
     def stop(self) -> None:
         self._stop.set()

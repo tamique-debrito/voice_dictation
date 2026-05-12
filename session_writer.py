@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from config import (
     CHUNK_TOKEN_TARGET,
@@ -123,6 +123,18 @@ class SessionWriter:
         # press, instead of at the cursor as of press time. See
         # ``schedule_marker``.
         self._pending_markers: list[tuple[float, str]] = []
+        # Callbacks waiting for transcription to reach a given audio time.
+        # Each entry is (audio_time, callback). The callback is invoked with
+        # the current cursor (len(buffer)) once a segment with end_time >=
+        # audio_time has been appended. Used by clipboard-window start to
+        # wait until segments through the press moment have been folded into
+        # the buffer before snapshotting the start cursor.
+        self._pending_cursor_callbacks: list[tuple[float, Callable[[int], None]]] = []
+        # Per-word index: parallel list of (buffer_offset, word_end_time)
+        # for every word appended to the buffer. Used by
+        # ``slice_for_paste_by_time`` to trim head/tail words whose audio
+        # straddles a clipboard-window press.
+        self._word_index: list[tuple[int, float, float]] = []  # (offset, w_start, w_end)
 
         self._started_at = datetime.now(tz=timezone.utc)
         self._ended_at: Optional[datetime] = None
@@ -131,24 +143,59 @@ class SessionWriter:
     # Public mutation API
     # ------------------------------------------------------------------
 
-    def feed_segment(self, text: str, end_time: float) -> None:
+    def feed_segment(
+        self,
+        text: str,
+        end_time: float,
+        words: Optional[list] = None,
+    ) -> None:
         """Append a transcribed segment to the buffer.
 
         ``end_time`` is the session-relative end of the segment. It's used by
         clipboard-window flush to know when the transcriber has caught up to
         a given hotkey-press timestamp.
 
+        ``words``, when provided, is a list of objects with ``text``,
+        ``start_time``, ``end_time``. The writer indexes their buffer
+        offsets so word-level slicing can trim straddling segments.
+
         After appending the segment, any pending markers whose audio
         threshold has now been overshot are flushed so they land AFTER the
-        segment that spans the press moment.
+        segment that spans the press moment, and any pending cursor-capture
+        callbacks whose audio time has been reached are fired with the
+        post-append cursor.
         """
         if not text:
             return
+        fired_callbacks: list[tuple[Callable[[int], None], int]] = []
         with self._lock:
             if self._buffer and not self._buffer.endswith((" ", "\n")):
                 self._buffer += " "
+            seg_offset = len(self._buffer)
             self._buffer += text
             self._latest_segment_end = end_time
+            # Index the words in the appended segment text. We re-locate each
+            # word by linear scan through the segment text so the offsets
+            # tolerate Whisper's leading-space convention on word.text.
+            if words:
+                cursor = seg_offset
+                seg_len = len(text)
+                for w in words:
+                    wt = (w.text if hasattr(w, "text") else w.get("text", "")).strip()
+                    if not wt:
+                        continue
+                    rel = text.find(wt, cursor - seg_offset)
+                    if rel < 0:
+                        # Word text didn't match (punctuation merge etc.) —
+                        # fall back to advancing cursor by word length.
+                        rel = cursor - seg_offset
+                    abs_off = seg_offset + rel
+                    self._word_index.append((
+                        abs_off,
+                        float(w.start_time if hasattr(w, "start_time") else w["start_time"]),
+                        float(w.end_time if hasattr(w, "end_time") else w["end_time"]),
+                    ))
+                    cursor = abs_off + len(wt)
             if self._pending_markers:
                 still_pending: list[tuple[float, str]] = []
                 for audio_time, token in self._pending_markers:
@@ -157,6 +204,19 @@ class SessionWriter:
                     else:
                         still_pending.append((audio_time, token))
                 self._pending_markers = still_pending
+            if self._pending_cursor_callbacks:
+                still_cb: list[tuple[float, Callable[[int], None]]] = []
+                for audio_time, cb in self._pending_cursor_callbacks:
+                    if audio_time <= end_time:
+                        fired_callbacks.append((cb, len(self._buffer)))
+                    else:
+                        still_cb.append((audio_time, cb))
+                self._pending_cursor_callbacks = still_cb
+        for cb, cursor in fired_callbacks:
+            try:
+                cb(cursor)
+            except Exception:
+                pass
 
     def latest_segment_end(self) -> float:
         with self._lock:
@@ -217,6 +277,49 @@ class SessionWriter:
         with self._lock:
             self._pending_markers.append((audio_time, token))
 
+    def schedule_cursor_capture(
+        self,
+        audio_time: float,
+        callback: Callable[[int], None],
+    ) -> None:
+        """Invoke ``callback(cursor)`` once a segment with end_time >=
+        audio_time has been folded into the buffer.
+
+        If the latest seen segment already covers ``audio_time``, the
+        callback fires immediately with the current cursor (still under the
+        lock to avoid racing concurrent feed_segment calls).
+        """
+        fire_now: Optional[int] = None
+        with self._lock:
+            latest = getattr(self, "_latest_segment_end", 0.0)
+            if latest >= audio_time:
+                fire_now = len(self._buffer)
+            else:
+                self._pending_cursor_callbacks.append((audio_time, callback))
+        if fire_now is not None:
+            try:
+                callback(fire_now)
+            except Exception:
+                pass
+
+    def flush_pending_markers(self) -> int:
+        """Drain all scheduled markers immediately, appending them at the
+        current cursor. Returns the number of markers drained.
+
+        Used by ``_finish_paste`` after the drain-wait completes so that
+        an end-press on a recording followed by silence still materializes
+        its end token, instead of leaving it pending until the next
+        recording's first segment crosses the old press time.
+        """
+        with self._lock:
+            n = len(self._pending_markers)
+            if not n:
+                return 0
+            for _audio_time, token in self._pending_markers:
+                self._append_token(token)
+            self._pending_markers = []
+            return n
+
     def remove_last_marker(self, type_name: str, kind: str) -> bool:
         """Find and remove the last occurrence of a specific marker token
         from the buffer. Used to scrub an unfinished recording/aside marker
@@ -263,6 +366,58 @@ class SessionWriter:
             if end is None:
                 end = len(self._buffer)
             return self._buffer[start:end]
+
+    def slice_for_paste_by_time(
+        self,
+        cursor_start: int,
+        cursor_end: Optional[int],
+        start_press_time: Optional[float],
+        end_press_time: Optional[float],
+        strip_span_types: Optional[set[str]] = None,
+    ) -> str:
+        """Slice with word-level trimming at the press-time boundaries.
+
+        Begins from the cursor-based span and then advances ``cursor_start``
+        forward past any words whose audio ends before ``start_press_time``,
+        and pulls ``cursor_end`` backward past any words whose audio starts
+        after ``end_press_time``. Falls back to the cursor-based slice if
+        the press times are None or no word index is available in the span.
+        """
+        with self._lock:
+            buf_len = len(self._buffer)
+            end = cursor_end if cursor_end is not None else buf_len
+            adj_start = cursor_start
+            adj_end = end
+            # Forward-trim leading words whose audio entirely precedes start.
+            if start_press_time is not None:
+                for off, w_start, w_end in self._word_index:
+                    if off < cursor_start or off >= end:
+                        continue
+                    if w_end <= start_press_time:
+                        # Word ended before press; skip past it.
+                        adj_start = max(adj_start, off + 0)
+                        # We want to land BEFORE the first word that
+                        # straddles or follows the press, so step the
+                        # cursor to the next word's offset on the next
+                        # iteration. Track that here:
+                    else:
+                        adj_start = off
+                        break
+            # Backward-trim trailing words whose audio entirely follows end.
+            if end_press_time is not None:
+                for off, w_start, w_end in reversed(self._word_index):
+                    if off < cursor_start or off >= end:
+                        continue
+                    if w_start >= end_press_time:
+                        adj_end = off
+                    else:
+                        break
+            if adj_end < adj_start:
+                adj_end = adj_start
+            raw = self._buffer[adj_start:adj_end]
+        if strip_span_types is None:
+            strip_span_types = set(self.marker_types.keys())
+        return _strip_markers(raw, strip_span_types)
 
     def slice_for_paste(
         self,

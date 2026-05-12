@@ -77,14 +77,62 @@ MAX_WINDOW_SECONDS = 25.0
 PASTE_DRAIN_TIMEOUT = 6.0
 
 
+class DebugLog:
+    """Thread-safe ring buffer of typed debug events.
+
+    Each event is ``{"ts": session_seconds, "kind": str, "data": dict}``.
+    The widget reads a snapshot via ``snapshot()`` from the status payload.
+    """
+
+    def __init__(self, maxlen: int = 2000):
+        self._events: deque = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+        self._origin: Optional[float] = None
+
+    def bind_origin(self, origin_monotonic: float) -> None:
+        self._origin = origin_monotonic
+
+    def _now(self) -> float:
+        if self._origin is None:
+            return 0.0
+        return time.monotonic() - self._origin
+
+    def log(self, kind: str, data: dict, ts: Optional[float] = None) -> None:
+        evt = {
+            "ts": round(ts if ts is not None else self._now(), 3),
+            "kind": kind,
+            "data": data,
+        }
+        with self._lock:
+            self._events.append(evt)
+
+    def snapshot(self, limit: int = 500) -> list[dict]:
+        with self._lock:
+            if limit >= len(self._events):
+                return list(self._events)
+            return list(self._events)[-limit:]
+
+
 class _ClipboardWindow:
     """Tracks an active r/aside paste window across aside park/resume."""
 
-    def __init__(self, label: str, start_cursor: int, end_press_time: float):
+    def __init__(
+        self,
+        label: str,
+        start_cursor: Optional[int],
+        end_press_time: float,
+        start_press_time: float,
+    ):
         self.label = label
-        # spans: list of (start, end). The last span has end=None while live.
-        self.spans: list[tuple[int, Optional[int]]] = [(start_cursor, None)]
+        # spans: list of (start, end). start can be None until the scheduled
+        # cursor-capture callback fires; end is None while the span is live.
+        self.spans: list[tuple[Optional[int], Optional[int]]] = [(start_cursor, None)]
         self.end_press_time = end_press_time
+        self.start_press_time = start_press_time
+
+    def set_start_cursor(self, cursor: int) -> None:
+        _, e = self.spans[0]
+        self.spans[0] = (cursor, e)
 
     def park(self, cursor: int) -> None:
         s, _ = self.spans[-1]
@@ -99,8 +147,17 @@ class _ClipboardWindow:
 
     def text(self, writer: SessionWriter) -> str:
         parts = []
-        for s, e in self.spans:
-            parts.append(writer.slice_for_paste(s, e))
+        for i, (s, e) in enumerate(self.spans):
+            if s is None:
+                # Start cursor never landed (very fast end). Use writer cursor.
+                s = writer.cursor()
+                self.spans[i] = (s, e)
+            # Apply word-level trimming only at the outer edges of the
+            # full window (start_press_time on the first span, end_press_time
+            # on the last). Internal park/resume spans use plain slicing.
+            sp = self.start_press_time if i == 0 else None
+            ep = self.end_press_time if i == len(self.spans) - 1 else None
+            parts.append(writer.slice_for_paste_by_time(s, e, sp, ep))
         return " ".join(p for p in parts if p)
 
 
@@ -159,6 +216,14 @@ class PersistentApp:
         # feeding it to VAD/transcription. Toggled by double-tap `m`.
         self._muted = threading.Event()
 
+        # Force-flush signal: set by clipboard-window end-press to ask the
+        # aggregator to immediately flush its in-progress audio window so
+        # trailing words reach the transcriber inside the paste-drain budget.
+        self._force_flush = threading.Event()
+
+        # Granular debug-event ring buffer surfaced to the widget.
+        self._debug = DebugLog(maxlen=2000)
+
         # Bare double-tap dispatcher
         keys = set(self._marker_keys) | {"r", "a", "x", "q", "m"}
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
@@ -178,7 +243,7 @@ class PersistentApp:
         window_end: float = 0.0
         last_chunk_check = 0.0
 
-        def flush_window(at_silence: bool) -> None:
+        def flush_window(reason: str) -> None:
             nonlocal window_pcm, window_start, window_end
             if not window_pcm or window_start is None:
                 window_pcm = bytearray()
@@ -186,15 +251,19 @@ class PersistentApp:
                 window_end = 0.0
                 vad.reset_counts()
                 return
-            # Gate on voiced content: drop windows that are almost entirely
-            # silence. Both an absolute floor (MIN_VOICED_MS) and a fraction
-            # floor (MIN_VOICED_FRAC) must be cleared. This is the primary
-            # defense against Whisper hallucinations on near-silent audio.
             voiced_ms = SilenceDetector.voiced_ms(vad.voiced_frames)
             voiced_frac = (
                 vad.voiced_frames / vad.total_frames if vad.total_frames else 0.0
             )
+            ws, we = window_start, window_end
             if voiced_ms < MIN_VOICED_MS or voiced_frac < MIN_VOICED_FRAC:
+                self._debug.log("audio_window", {
+                    "start": round(ws, 3), "end": round(we, 3),
+                    "voiced_ms": int(voiced_ms),
+                    "voiced_frac": round(voiced_frac, 3),
+                    "reason": "dropped_silent",
+                    "trigger": reason,
+                })
                 window_pcm = bytearray()
                 window_start = None
                 window_end = 0.0
@@ -204,14 +273,25 @@ class PersistentApp:
                 self.window_q.put(
                     AudioWindow(
                         pcm=bytes(window_pcm),
-                        start_time=window_start,
-                        end_time=window_end,
+                        start_time=ws,
+                        end_time=we,
                     ),
                     timeout=2.0,
                 )
+                self._debug.log("audio_window", {
+                    "start": round(ws, 3), "end": round(we, 3),
+                    "voiced_ms": int(voiced_ms),
+                    "voiced_frac": round(voiced_frac, 3),
+                    "reason": reason,
+                })
             except queue.Full:
-                # Transcriber is way behind. Drop this window.
-                pass
+                self._debug.log("audio_window", {
+                    "start": round(ws, 3), "end": round(we, 3),
+                    "voiced_ms": int(voiced_ms),
+                    "voiced_frac": round(voiced_frac, 3),
+                    "reason": "dropped_queue_full",
+                    "trigger": reason,
+                })
             window_pcm = bytearray()
             window_start = None
             window_end = 0.0
@@ -250,9 +330,17 @@ class PersistentApp:
                     break
 
             window_seconds = window_end - window_start
-            if saw_boundary or window_seconds >= MAX_WINDOW_SECONDS:
-                flush_window(at_silence=saw_boundary)
-                if saw_boundary:
+            forced = self._force_flush.is_set()
+            if forced:
+                self._force_flush.clear()
+            if forced or saw_boundary or window_seconds >= MAX_WINDOW_SECONDS:
+                reason = (
+                    "forced" if forced
+                    else "silence" if saw_boundary
+                    else "max_window"
+                )
+                flush_window(reason=reason)
+                if saw_boundary or forced:
                     # Drain any pending chunk if size threshold is met.
                     self._maybe_flush_chunk(at_silence_boundary=True)
 
@@ -262,7 +350,7 @@ class PersistentApp:
                 last_chunk_check = now
                 self._maybe_flush_chunk(at_silence_boundary=False)
 
-        flush_window(at_silence=True)
+        flush_window(reason="shutdown")
 
     def _maybe_flush_chunk(self, at_silence_boundary: bool) -> None:
         path = self.writer.maybe_flush_chunk(at_silence_boundary=at_silence_boundary)
@@ -279,8 +367,18 @@ class PersistentApp:
                 seg: Segment = self.segment_q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            self.writer.feed_segment(seg.text, seg.end_time)
+            self.writer.feed_segment(seg.text, seg.end_time, words=seg.words)
             self._stream_server.broadcast(seg.text, seg.end_time)
+            self._debug.log("segment", {
+                "text": seg.text,
+                "start": round(seg.start_time, 3),
+                "end": round(seg.end_time, 3),
+                "words": [
+                    {"text": w.text, "s": round(w.start_time, 3),
+                     "e": round(w.end_time, 3), "p": round(w.probability, 3)}
+                    for w in seg.words
+                ],
+            })
 
     # ------------------------------------------------------------------
     # Hotkey actions (called from pynput listener thread)
@@ -338,6 +436,10 @@ class PersistentApp:
         if not events:
             return
         for action, type_name in events:
+            self._debug.log("marker", {
+                "type": type_name, "action": action, "key": key,
+            })
+        for action, type_name in events:
             verb = "opened" if action == "open" else "closed"
             note = ""
             if len(events) > 1 and action == "close":
@@ -360,22 +462,54 @@ class PersistentApp:
                         style="yellow",
                     )
                     return
+                press_ts = time.monotonic()
+                press_session = self._cursor_time_at(press_ts)
                 # Emit recording-start marker into the transcript.
                 self.writer.append_marker(RECORDING_MARKER_TYPE, "start")
-                cursor = self.writer.cursor()
-                self._r_window = _ClipboardWindow("r", cursor, time.monotonic())
+                # Schedule the start cursor to land AFTER segments whose
+                # audio reaches the press moment, so post-press words don't
+                # get buried behind the cursor by a late-arriving window.
+                self._r_window = _ClipboardWindow(
+                    "r", start_cursor=None,
+                    end_press_time=press_ts, start_press_time=press_session,
+                )
+                w = self._r_window
+                requested = time.monotonic()
+                def _set_cursor(cursor: int, _w=w, _req=requested,
+                                _pt=press_session):
+                    _w.set_start_cursor(cursor)
+                    self._debug.log("cursor_capture", {
+                        "label": "r",
+                        "press_time": round(_pt, 3),
+                        "fired_latency_ms": int((time.monotonic() - _req) * 1000),
+                        "cursor": cursor,
+                    })
+                self.writer.schedule_cursor_capture(press_session, _set_cursor)
+                self._debug.log("press", {
+                    "key": "r", "phase": "start",
+                    "session_time": round(press_session, 3),
+                })
                 self._done("started r capture")
             else:
                 # End r: defer marker insertion until transcription has
                 # caught up to the press moment, so the token lands AFTER
                 # any in-flight segments whose audio precedes the press.
                 press_ts = time.monotonic()
+                press_session = self._cursor_time_at(press_ts)
+                # Force the aggregator to flush its in-progress audio so
+                # trailing words reach the transcriber inside the
+                # paste-drain budget, instead of waiting for VAD silence.
+                self._force_flush.set()
                 self.writer.schedule_marker(
-                    RECORDING_MARKER_TYPE, "end", self._cursor_time_at(press_ts)
+                    RECORDING_MARKER_TYPE, "end", press_session
                 )
                 self._r_window.end_press_time = press_ts
                 window = self._r_window
                 self._r_window = None
+                self._debug.log("press", {
+                    "key": "r", "phase": "end",
+                    "session_time": round(press_session, 3),
+                })
                 threading.Thread(
                     target=self._finish_paste, args=(window,), daemon=True
                 ).start()
@@ -383,19 +517,48 @@ class PersistentApp:
     def _toggle_aside(self) -> None:
         with self._state_lock:
             if self._aside_window is None:
+                press_ts = time.monotonic()
+                press_session = self._cursor_time_at(press_ts)
                 self.writer.append_marker(ASIDE_MARKER_TYPE, "start")
-                cursor = self.writer.cursor()
+                # Park the active r window at the (current) cursor; the
+                # aside's own start cursor is scheduled by audio time.
                 if self._r_window is not None:
-                    self._r_window.park(cursor)
-                self._aside_window = _ClipboardWindow("aside", cursor, time.monotonic())
+                    self._r_window.park(self.writer.cursor())
+                self._aside_window = _ClipboardWindow(
+                    "aside", start_cursor=None,
+                    end_press_time=press_ts, start_press_time=press_session,
+                )
+                w = self._aside_window
+                requested = time.monotonic()
+                def _set_cursor(cursor: int, _w=w, _req=requested,
+                                _pt=press_session):
+                    _w.set_start_cursor(cursor)
+                    self._debug.log("cursor_capture", {
+                        "label": "aside",
+                        "press_time": round(_pt, 3),
+                        "fired_latency_ms": int((time.monotonic() - _req) * 1000),
+                        "cursor": cursor,
+                    })
+                self.writer.schedule_cursor_capture(press_session, _set_cursor)
+                self._debug.log("press", {
+                    "key": "a", "phase": "start",
+                    "session_time": round(press_session, 3),
+                })
                 self._done("started aside capture")
             else:
+                press_ts = time.monotonic()
+                press_session = self._cursor_time_at(press_ts)
+                self._force_flush.set()
                 self.writer.append_marker(ASIDE_MARKER_TYPE, "end")
-                self._aside_window.end_press_time = time.monotonic()
+                self._aside_window.end_press_time = press_ts
                 window = self._aside_window
                 self._aside_window = None
                 if self._r_window is not None:
                     self._r_window.resume(self.writer.cursor())
+                self._debug.log("press", {
+                    "key": "a", "phase": "end",
+                    "session_time": round(press_session, 3),
+                })
                 threading.Thread(
                     target=self._finish_paste, args=(window,), daemon=True
                 ).start()
@@ -403,9 +566,11 @@ class PersistentApp:
     def _toggle_mute(self) -> None:
         if self._muted.is_set():
             self._muted.clear()
+            self._debug.log("mute", {"state": "off"})
             self._done("unmuted — transcription resumed")
         else:
             self._muted.set()
+            self._debug.log("mute", {"state": "on"})
             self._done("muted — transcription paused", style="bold yellow")
 
     def _cancel_window(self) -> None:
@@ -428,15 +593,29 @@ class PersistentApp:
 
     def _finish_paste(self, window: _ClipboardWindow) -> None:
         # Wait for the transcriber to drain past the end-press timestamp.
+        wait_started = time.monotonic()
         deadline = window.end_press_time + PASTE_DRAIN_TIMEOUT
         target = self._cursor_time_at(window.end_press_time)
+        timed_out = True
         while time.monotonic() < deadline:
             if self.writer.latest_segment_end() >= target:
+                timed_out = False
                 break
             time.sleep(0.1)
+        drain_wait_ms = int((time.monotonic() - wait_started) * 1000)
         # Close the live span at the current cursor and paste.
         window.close(self.writer.cursor())
         text = window.text(self.writer).strip()
+        self._debug.log("paste", {
+            "label": window.label,
+            "start_press_time": round(window.start_press_time, 3),
+            "end_press_time": round(self._cursor_time_at(window.end_press_time), 3),
+            "spans": [list(s) for s in window.spans],
+            "drain_wait_ms": drain_wait_ms,
+            "timed_out": timed_out,
+            "char_count": len(text),
+            "preview": text[:200],
+        })
         if not text:
             self._done(f"{window.label} → nothing to paste", style="yellow")
             return
@@ -466,6 +645,9 @@ class PersistentApp:
     def run(self) -> None:
         self._print_banner()
         self.recorder.start()
+        # Anchor debug timestamps to the same monotonic origin the recorder
+        # uses, so all event ts values are session-relative seconds.
+        self._debug.bind_origin(self.recorder.started_monotonic or time.monotonic())
         self._stream_server.start()
         self.transcriber.start()
         self._aggregator_thread = threading.Thread(
@@ -537,6 +719,11 @@ class PersistentApp:
             "open_marker_since": marker_open_since,
             "paste_log": paste_log,
             "transcript_tail": self.writer.tail(2000),
+            "now_seconds": round(
+                time.monotonic() - (self.recorder.started_monotonic or time.monotonic()),
+                3,
+            ),
+            "debug_events": self._debug.snapshot(limit=500),
         }
 
     def _on_press(self, key) -> None:
@@ -565,7 +752,7 @@ class PersistentApp:
                 seg: Segment = self.segment_q.get_nowait()
             except queue.Empty:
                 break
-            self.writer.feed_segment(seg.text, seg.end_time)
+            self.writer.feed_segment(seg.text, seg.end_time, words=seg.words)
         # Final chunk + meta.
         path = self.writer.force_flush()
         if path:
