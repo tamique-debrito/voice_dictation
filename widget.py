@@ -303,6 +303,14 @@ _INDEX_HTML = """<!doctype html>
   }
   poll();
   setInterval(poll, 500);
+  // Background tabs get setInterval throttled to ~1/min on macOS, which
+  // leaves the "disconnected" banner stuck until the next throttled tick.
+  // Kick a fresh poll the moment the tab is visible or focused again so
+  // reconnection is instant on focus instead of waiting up to a minute.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) poll();
+  });
+  window.addEventListener('focus', poll);
 })();
 </script>
 </body>
@@ -314,6 +322,14 @@ class _Handler(BaseHTTPRequestHandler):
     # Suppress per-request access logs — the 2 Hz poll would spam the console.
     def log_message(self, format, *args):
         return
+
+    def handle_one_request(self):  # noqa: N802 (BaseHTTPRequestHandler API)
+        # Swallow socket-close races: when the dashboard reloads or closes a
+        # tab mid-response, the 2 Hz poll otherwise spams a traceback.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/" or self.path.startswith("/?"):
