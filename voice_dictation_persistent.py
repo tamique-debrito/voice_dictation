@@ -71,6 +71,7 @@ from config import (
     SILENCE_MS,
     TRANSCRIPT_STREAM_PORT,
     VAD_AGGRESSIVENESS,
+    WIDGET_PORT,
 )
 from transcript_stream_server import TranscriptStreamServer
 from hotkeys import BareDoubleTap, key_char, load_config
@@ -706,7 +707,15 @@ class PersistentApp:
         if self._enable_widget:
             try:
                 self._widget = widget_module.StatusServer(self.get_status_snapshot)
-                host, port = self._widget.start()
+                try:
+                    host, port = self._widget.start(port=WIDGET_PORT)
+                except OSError:
+                    # Fixed port in use (e.g. another instance still running);
+                    # fall back to an ephemeral port so the app still launches.
+                    self.console.print(
+                        f"[yellow]Widget port {WIDGET_PORT} in use; using ephemeral port[/yellow]"
+                    )
+                    host, port = self._widget.start(port=0)
                 url = f"http://{host}:{port}"
                 self.console.print(f"[bold]Widget:[/bold] {url}")
                 webbrowser.open(url)

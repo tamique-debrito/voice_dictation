@@ -601,8 +601,13 @@ _INDEX_HTML = """<!doctype html>
   }
 
   async function poll() {
+    // Abort hung polls so a wedged keep-alive connection can't permanently
+    // jam the per-origin pool (manifests as a stuck "disconnected" banner
+    // that hard-refresh can't recover from, but a new browser can).
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 2000);
     try {
-      const r = await fetch('/status', { cache: 'no-store' });
+      const r = await fetch('/status', { cache: 'no-store', signal: ctrl.signal });
       if (!r.ok) throw new Error('status ' + r.status);
       const s = await r.json();
       $('disconnected').style.display = 'none';
@@ -613,6 +618,8 @@ _INDEX_HTML = """<!doctype html>
       renderTimeline(s.debug_events || [], s.now_seconds || 0);
     } catch (e) {
       $('disconnected').style.display = 'block';
+    } finally {
+      clearTimeout(tid);
     }
   }
   poll();

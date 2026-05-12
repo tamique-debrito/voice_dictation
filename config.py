@@ -109,3 +109,8 @@ def _auto_detect_device() -> str:
 FW_DEVICE = os.getenv("FW_DEVICE") or _auto_detect_device()
 
 TRANSCRIPT_STREAM_PORT = int(os.getenv("TRANSCRIPT_STREAM_PORT", "8766"))
+
+# Status widget HTTP port. Fixed (rather than ephemeral) so a browser tab
+# opened from a previous run keeps working across restarts — otherwise the
+# old tab points at a dead port and hard-refresh can't fix it.
+WIDGET_PORT = int(os.getenv("WIDGET_PORT", "8767"))
