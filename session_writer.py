@@ -208,7 +208,13 @@ class SessionWriter:
                 still_cb: list[tuple[float, Callable[[int], None]]] = []
                 for audio_time, cb in self._pending_cursor_callbacks:
                     if audio_time <= end_time:
-                        fired_callbacks.append((cb, len(self._buffer)))
+                        # Land at the start of THIS segment, not after it, so
+                        # the segment that crosses the press moment is inside
+                        # the captured span and word-level trimming can chop
+                        # any leading words whose audio ends before the press.
+                        # Landing after the segment would put cursor_start
+                        # past all the words, yielding an empty slice.
+                        fired_callbacks.append((cb, seg_offset))
                     else:
                         still_cb.append((audio_time, cb))
                 self._pending_cursor_callbacks = still_cb

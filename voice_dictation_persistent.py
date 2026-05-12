@@ -40,6 +40,18 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
+# Skip HuggingFace's "is there a newer model?" network check on startup
+# unless the user explicitly opted in for this run with --check-updates.
+# Without this, a slow/blocked HF connection stalls model load for 60s+.
+# Must be set BEFORE faster_whisper is imported (via streaming_transcriber).
+_CHECK_UPDATES = "--check-updates" in sys.argv
+if not _CHECK_UPDATES:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# Tracker file recording when we last actually contacted HF for updates.
+_HF_CHECK_FILE = os.path.join(os.path.dirname(__file__), ".last_hf_check")
+_HF_CHECK_STALE_SECONDS = 30 * 24 * 3600  # 30 days
+
 from pynput import keyboard
 from rich.console import Console
 from rich.panel import Panel
@@ -464,6 +476,19 @@ class PersistentApp:
                     return
                 press_ts = time.monotonic()
                 press_session = self._cursor_time_at(press_ts)
+                # Drain any markers still pending from a prior recording
+                # (most commonly the end marker for a fast end-then-start
+                # sequence whose paste-finish drain hasn't fired yet).
+                # Without this, the new start token would land BEFORE the
+                # stale end token, producing `start start ... end` in the
+                # buffer instead of `start end start ... end`.
+                drained = self.writer.flush_pending_markers()
+                if drained:
+                    self._debug.log("marker", {
+                        "type": "recording", "action": "drained_pending",
+                        "key": "-", "count": drained,
+                        "trigger": "new_start",
+                    })
                 # Emit recording-start marker into the transcript.
                 self.writer.append_marker(RECORDING_MARKER_TYPE, "start")
                 # Schedule the start cursor to land AFTER segments whose
@@ -519,6 +544,13 @@ class PersistentApp:
             if self._aside_window is None:
                 press_ts = time.monotonic()
                 press_session = self._cursor_time_at(press_ts)
+                drained = self.writer.flush_pending_markers()
+                if drained:
+                    self._debug.log("marker", {
+                        "type": "aside", "action": "drained_pending",
+                        "key": "-", "count": drained,
+                        "trigger": "new_start",
+                    })
                 self.writer.append_marker(ASIDE_MARKER_TYPE, "start")
                 # Park the active r window at the (current) cursor; the
                 # aside's own start cursor is scheduled by audio time.
@@ -808,7 +840,32 @@ def main():
                         help=f"compute type (default: {FW_COMPUTE})")
     parser.add_argument("--no-widget", action="store_true",
                         help="Disable the HTTP status widget + browser auto-open.")
+    parser.add_argument("--check-updates", action="store_true",
+                        help="Allow HuggingFace Hub network check for newer "
+                             "model versions on this run. Default is offline "
+                             "load from cache for fast, network-independent "
+                             "startup.")
     args = parser.parse_args()
+
+    if not args.check_updates:
+        # Print a one-line nudge if it's been a while since we last checked.
+        try:
+            mtime = os.path.getmtime(_HF_CHECK_FILE)
+            stale = (time.time() - mtime) > _HF_CHECK_STALE_SECONDS
+        except OSError:
+            stale = True
+        if stale:
+            days = "never"
+            try:
+                age = int((time.time() - mtime) / 86400)
+                days = f"{age}d ago"
+            except Exception:
+                pass
+            print(
+                f"[hf] model update check skipped (last: {days}). "
+                f"Run with --check-updates to refresh.",
+                file=sys.stderr,
+            )
 
     config = load_config(args.config)
     app = PersistentApp(
@@ -818,6 +875,17 @@ def main():
         compute=args.compute,
         enable_widget=not args.no_widget,
     )
+    if args.check_updates:
+        # If the model loaded successfully (PersistentApp constructor builds
+        # the StreamingTranscriber but doesn't load the model — that happens
+        # in app.run() via transcriber.start). Touch the tracker after run()
+        # would be too late (only on shutdown). Touch right before run() —
+        # the model load is the next step and any failure there is loud.
+        try:
+            with open(_HF_CHECK_FILE, "w") as f:
+                f.write(str(int(time.time())))
+        except OSError:
+            pass
     app.run()
 
 

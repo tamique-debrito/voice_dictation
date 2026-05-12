@@ -135,8 +135,30 @@ _INDEX_HTML = """<!doctype html>
   table.pastes td.label.r { color: var(--r-active); }
   table.pastes td.label.aside { color: var(--aside-active); }
   table.pastes td.preview { color: var(--fg); }
-  table.pastes tr { cursor: help; }
+  table.pastes tr { cursor: copy; }
   table.pastes tr:hover td { background: var(--panel-2); }
+  table.pastes tr.copied td { background: #2a4a2a; transition: background 0.4s; }
+
+  .copyable { cursor: copy; position: relative; }
+  .copyable.copied {
+    box-shadow: inset 0 0 0 2px var(--good);
+    transition: box-shadow 0.4s;
+  }
+  #copy-toast {
+    position: fixed;
+    bottom: 16px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--good); color: #1b1d23;
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 100;
+  }
+  #copy-toast.show { opacity: 1; }
 
   #transcript {
     padding: 12px;
@@ -237,6 +259,7 @@ _INDEX_HTML = """<!doctype html>
   <div class="meta" id="uptime"></div>
 </header>
 <div id="disconnected">⚠ disconnected from monitoring service</div>
+<div id="copy-toast">copied</div>
 <main>
   <section id="pastes-section" class="collapsible" data-state="collapsed">
     <h2><span class="chev">▸</span>Paste log</h2>
@@ -245,7 +268,7 @@ _INDEX_HTML = """<!doctype html>
   <section id="transcript-section" class="collapsible" data-state="collapsed">
     <h2><span class="chev">▸</span>Transcript (tail)</h2>
     <div class="body" id="transcript-body">
-      <div id="transcript" class="empty">no audio yet</div>
+      <div id="transcript" class="empty copyable" title="click to copy full transcript tail">no audio yet</div>
     </div>
   </section>
   <section id="timeline-section" class="collapsible" data-state="collapsed">
@@ -275,7 +298,7 @@ _INDEX_HTML = """<!doctype html>
         <span class="chip on" data-kind="paste">paste</span>
         <span class="chip on" data-kind="mute">mute</span>
       </div>
-      <div id="events-table"><div class="empty">no events yet</div></div>
+      <div id="events-table" class="copyable" title="click to copy all visible events"><div class="empty">no events yet</div></div>
     </div>
   </section>
 </main>
@@ -285,6 +308,38 @@ _INDEX_HTML = """<!doctype html>
   const escape = (s) => s.replace(/[&<>"']/g, c => (
     {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const MARKER_RE = /&lt;&lt;&lt;MARKER:([a-z_]+):(start|end)&gt;&gt;&gt;/g;
+
+  // ---- Click-to-copy ---------------------------------------------------
+  let toastTimer = null;
+  function flashToast(msg) {
+    const t = $('copy-toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 900);
+  }
+  async function copyText(text, el, label) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      flashToast(`copied ${label} (${text.length}c)`);
+      if (el) {
+        el.classList.add('copied');
+        setTimeout(() => el.classList.remove('copied'), 400);
+      }
+    } catch (e) {
+      flashToast('copy failed (clipboard permission?)');
+    }
+  }
+
+  // Plaintext-ize the transcript: strip the marker tokens so the copied
+  // text is the actual content, not the raw <<<MARKER:...>>>; keep them
+  // as inline [type:kind] hints so structure is still readable.
+  function transcriptToPlain(text) {
+    if (!text) return '';
+    return text.replace(/<<<MARKER:([a-z_]+):(start|end)>>>/g,
+                        (_, t, k) => `[${t}:${k}]`);
+  }
 
   // Wire up collapse toggles. Both sections default to "collapsed" via HTML.
   document.querySelectorAll('section.collapsible').forEach(sec => {
@@ -318,16 +373,19 @@ _INDEX_HTML = """<!doctype html>
     }
   }
 
+  let lastTranscript = '';
   function renderTranscript(text) {
     const el = $('transcript');
     const body = $('transcript-body');
     attachScrollWatcher(body);
+    lastTranscript = text || '';
     if (!text) {
-      el.className = 'empty';
+      el.className = 'empty copyable';
       el.textContent = 'no audio yet';
       return;
     }
-    el.className = '';
+    el.className = 'copyable';
+    el.title = 'click to copy full transcript tail';
     const escaped = escape(text);
     const html = escaped.replace(MARKER_RE, (m, type, kind) => {
       const cls = ['marker-pill', type].join(' ');
@@ -336,6 +394,15 @@ _INDEX_HTML = """<!doctype html>
     el.innerHTML = html;
     pinToBottomIfStuck(body);
   }
+  // Single delegated click handler for the transcript element.
+  document.addEventListener('DOMContentLoaded', () => {});
+  // Attach immediately — the element exists at parse time.
+  $('transcript').addEventListener('click', (ev) => {
+    // Avoid stealing text-selection clicks.
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return;
+    copyText(transcriptToPlain(lastTranscript), $('transcript'), 'transcript');
+  });
 
   function renderPastes(pastes) {
     const body = $('pastes-body');
@@ -346,15 +413,24 @@ _INDEX_HTML = """<!doctype html>
     }
     // Server sends chronological (oldest first, newest last). Render as-is
     // so the tail is at the bottom of the scrolling region.
-    const rows = pastes.map(p => {
+    const rows = pastes.map((p, i) => {
       const labelCls = p.label === 'r' ? 'r' : 'aside';
-      return `<tr title="${escape(p.full || '')}">` +
+      return `<tr data-idx="${i}" title="click to copy">` +
              `<td class="ts">${escape(p.ts)}</td>` +
              `<td class="label ${labelCls}">${escape(p.label)}</td>` +
              `<td class="preview">${escape(p.preview)}</td>` +
              `</tr>`;
     }).join('');
     body.innerHTML = `<table class="pastes"><tbody>${rows}</tbody></table>`;
+    body.querySelectorAll('tr[data-idx]').forEach(tr => {
+      tr.addEventListener('click', (ev) => {
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) return;
+        const idx = parseInt(tr.dataset.idx, 10);
+        const p = pastes[idx];
+        copyText(p.full || p.preview || '', tr, `paste ${p.label}`);
+      });
+    });
     pinToBottomIfStuck(body);
   }
 
@@ -412,7 +488,7 @@ _INDEX_HTML = """<!doctype html>
       case 'paste':
         return `${d.label} ${d.char_count}c drain=${d.drain_wait_ms}ms` +
                (d.timed_out ? ' TIMEOUT' : '') +
-               ` press=[${d.start_press_time?.toFixed(2)}–${d.end_press_time?.toFixed(2)}s]\n${d.preview}`;
+               ` press=[${d.start_press_time?.toFixed(2)}–${d.end_press_time?.toFixed(2)}s]\\n${d.preview}`;
       case 'mute':
         return d.state;
       default:
@@ -420,15 +496,18 @@ _INDEX_HTML = """<!doctype html>
     }
   }
 
+  let lastEventsRendered = [];
   function renderEvents(events) {
     const host = $('events-table');
     attachScrollWatcher($('events-body'));
     if (!events || events.length === 0) {
       host.innerHTML = '<div class="empty">no events yet</div>';
+      lastEventsRendered = [];
       return;
     }
-    const filtered = events.filter(e => enabledKinds.has(e.kind));
-    const rows = filtered.slice(-300).map(e => (
+    const filtered = events.filter(e => enabledKinds.has(e.kind)).slice(-300);
+    lastEventsRendered = filtered;
+    const rows = filtered.map(e => (
       `<tr class="kind-${e.kind}">` +
       `<td class="ts">${e.ts.toFixed(2)}</td>` +
       `<td class="kind">${e.kind}</td>` +
@@ -438,6 +517,18 @@ _INDEX_HTML = """<!doctype html>
     host.innerHTML = `<table class="events"><tbody>${rows}</tbody></table>`;
     pinToBottomIfStuck($('events-body'));
   }
+  function eventsToPlain(evts) {
+    return evts.map(e =>
+      `${e.ts.toFixed(2).padStart(7)}  ${e.kind.padEnd(15)} ${summarize(e)}`
+    ).join('\\n');
+  }
+  $('events-table').addEventListener('click', (ev) => {
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return;
+    if (!lastEventsRendered.length) return;
+    copyText(eventsToPlain(lastEventsRendered), $('events-table'),
+             `${lastEventsRendered.length} events`);
+  });
 
   // ---- Timeline -------------------------------------------------------
   // Last WINDOW_SECONDS of session-relative time, rendered as parallel lanes.
