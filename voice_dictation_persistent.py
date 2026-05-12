@@ -603,6 +603,18 @@ class PersistentApp:
                 break
             time.sleep(0.1)
         drain_wait_ms = int((time.monotonic() - wait_started) * 1000)
+        # Materialize any pending markers (notably the recording-end token
+        # for THIS press) at the current cursor. Otherwise, if the audio
+        # right after the end-press is silent and the press_time is never
+        # crossed by a segment, the pending end marker sits in the queue
+        # and gets drained by the next recording's first segment — landing
+        # in the middle of the new recording's content.
+        drained = self.writer.flush_pending_markers()
+        if drained:
+            self._debug.log("marker", {
+                "type": "recording", "action": "drained_pending",
+                "key": "-", "count": drained,
+            })
         # Close the live span at the current cursor and paste.
         window.close(self.writer.cursor())
         text = window.text(self.writer).strip()
