@@ -36,6 +36,11 @@ _INDEX_HTML = """<!doctype html>
     --marker: #f0a04b;
     --good: #6abf4b;
     --bad: #d64545;
+    /* HQ transcript text: a brighter, slightly cooler tone than the
+       default fast-stream color so the eye can distinguish the
+       HQ-decoded prefix from the fast-only tail at a glance. */
+    --src-hq: #b3e5fc;
+    --src-fast: #cfcfd5;
   }
   body {
     margin: 0;
@@ -182,6 +187,110 @@ _INDEX_HTML = """<!doctype html>
   .marker-pill.recording { background: var(--r-active); color: #fff; }
   .marker-pill.aside     { background: var(--aside-active); color: #1b1d23; }
 
+  /* Settings: floating gear + modal */
+  #settings-gear {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid #3a3d45;
+    background: var(--panel);
+    color: var(--fg);
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    z-index: 100;
+    line-height: 1;
+  }
+  #settings-gear:hover { background: var(--panel-2); }
+  #settings-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200;
+  }
+  #settings-overlay[hidden] { display: none; }
+  #settings-modal {
+    background: var(--panel);
+    border: 1px solid #0d0e11;
+    border-radius: 8px;
+    width: min(640px, 92vw);
+    max-height: 86vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  #settings-modal header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px;
+    border-bottom: 1px solid #0d0e11;
+  }
+  #settings-modal h3 { margin: 0; font-size: 15px; }
+  #settings-close {
+    background: transparent; border: none; color: var(--muted);
+    font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
+  }
+  #settings-close:hover { color: var(--fg); }
+  #settings-modal .modal-body {
+    overflow-y: auto;
+    padding: 12px 16px;
+    flex: 1;
+  }
+  #settings-modal .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+  #settings-modal fieldset {
+    border: 1px solid #3a3d45; border-radius: 6px;
+    padding: 10px 12px 4px; margin-bottom: 12px;
+  }
+  #settings-modal legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
+  #settings-modal label {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px; font-size: 13px; gap: 12px;
+  }
+  #settings-modal label.checkbox { justify-content: flex-start; }
+  #settings-modal label.checkbox input { margin-right: 8px; }
+  #settings-modal input[type="number"],
+  #settings-modal select {
+    background: #15171c; color: var(--fg);
+    border: 1px solid #3a3d45; border-radius: 4px;
+    padding: 4px 8px; font-size: 13px; min-width: 140px;
+  }
+  #settings-modal .deferred-note { color: var(--muted); font-size: 11px; }
+  #settings-modal details { margin-top: 8px; }
+  #settings-modal details summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+  #settings-modal textarea {
+    width: 100%; height: 200px; margin-top: 8px;
+    background: #15171c; color: var(--fg);
+    border: 1px solid #3a3d45; border-radius: 4px;
+    padding: 8px; font-family: monospace; font-size: 12px;
+    box-sizing: border-box;
+  }
+  #settings-modal footer {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #0d0e11;
+  }
+  #settings-modal footer button {
+    padding: 6px 14px; border: none; border-radius: 4px;
+    background: #3a3d45; color: var(--fg); cursor: pointer;
+  }
+  #settings-modal footer button.primary { background: var(--accent); color: #fff; font-weight: 600; }
+  #settings-modal footer #settings-status { flex: 1; color: var(--muted); font-size: 12px; }
+
+  /* Merged transcript: HQ prefix in one color, fast tail in another. */
+  .src-hq   { color: var(--src-hq); }
+  .src-fast { color: var(--src-fast); }
+  .hq-edge {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 6px;
+    border-radius: 8px;
+    background: #324a5a;
+    color: #b3e5fc;
+    font-size: 11px;
+    vertical-align: middle;
+  }
+
   /* Debug panels */
   .debug-controls {
     padding: 8px 12px;
@@ -191,8 +300,24 @@ _INDEX_HTML = """<!doctype html>
     flex-wrap: wrap;
     align-items: center;
     border-bottom: 1px solid #1b1d23;
+    /* Anchor the filter chips to the top of the scrollable section body
+       so they remain visible when the events list grows long. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
   .debug-controls label { color: var(--muted); font-size: 12px; }
+  .timeline-controls {
+    padding: 6px 12px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    border-bottom: 1px solid #1b1d23;
+    background: var(--panel-2);
+    font-size: 11px;
+  }
+  .timeline-controls .filter-label { color: var(--muted); }
   .chip {
     display: inline-block;
     padding: 2px 8px;
@@ -205,6 +330,18 @@ _INDEX_HTML = """<!doctype html>
     border: 1px solid transparent;
   }
   .chip.on { background: var(--accent); color: #fff; border-color: #b39ddb; }
+  /* Stream chip colors are chosen NOT to overlap with any audio_window
+     reason color (forced=orange, silence=blue, max=pink, drops=red/grey)
+     or the press/marker color. Stream identity is conveyed by row
+     position + shape, not by per-bar color. */
+  .chip.stream-fast.on { background: #607d8b; color: #fff; border-color: #607d8b; }
+  .chip.stream-hq.on   { background: #26a69a; color: #fff; border-color: #26a69a; }
+  .chip-sep { display: inline-block; width: 1px; height: 14px; background: #3a3d45;
+              vertical-align: middle; margin: 0 4px; }
+  .filter-label { color: var(--muted); font-size: 11px; margin-right: 2px; }
+  .legend-swatch { display: inline-block; width: 12px; height: 10px; vertical-align: middle;
+                   margin-right: 2px; border-radius: 2px; }
+  .legend-lbl { color: var(--muted); font-size: 10px; margin-right: 6px; }
   table.events {
     width: 100%; border-collapse: collapse;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -226,11 +363,85 @@ _INDEX_HTML = """<!doctype html>
   table.events tr.kind-marker td.kind    { color: var(--marker); }
   table.events tr.kind-cursor_capture td.kind { color: #c792ea; }
   table.events tr.kind-mute td.kind      { color: #e7c84a; }
+  table.events tr.kind-debug_flag td.kind { color: #ff5252; font-weight: 800; }
+  table.events tr.kind-debug_flag { background: rgba(255, 82, 82, 0.08); }
 
+  /* Timeline body lays out a collapsible label gutter to the LEFT and
+     the SVG to the right. The gutter labels each y-band with plain text;
+     stream identity in the bars themselves is conveyed by row position
+     plus the HQ-only teal-dotted-top shape signature — no per-stream
+     coloring in the gutter, because the audio_window band's bars can
+     take many different colors based on reason. */
+  .timeline-row {
+    display: flex;
+    align-items: stretch;
+    background: var(--panel-2);
+  }
+  #timeline-labels {
+    flex: 0 0 120px;
+    background: var(--panel);
+    border-right: 1px solid #1b1d23;
+    position: relative;
+    height: 220px;
+    font-size: 10px;
+    color: var(--muted);
+    transition: flex-basis 0.15s ease;
+  }
+  #timeline-labels.collapsed { flex-basis: 18px; }
+  #timeline-labels.collapsed .row-label { display: none; }
+  .row-label {
+    position: absolute;
+    left: 6px;
+    right: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap;
+    /* line-height: 1 + explicit font-size so the label's text center
+       sits exactly font-size/2 below its `top`. Each label's `top:` is
+       then computed as (bar_center − font_size/2) so the text center
+       lines up with the bar center in the SVG to the right. Default
+       line-height (~1.2) would drift labels down ~1px per row,
+       accumulating into a visible misalignment by the time you reach
+       the segment / paste bands. */
+    line-height: 1;
+    font-size: 9px;
+  }
+  .row-label.group {
+    font-weight: 700;
+    color: #b6bac1;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 7px;
+  }
+  .row-label.sub {
+    padding-left: 12px;
+  }
+  .press-tri-down {
+    display: inline-block; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid #6abf4b; vertical-align: middle; margin-right: 2px;
+  }
+  .press-tri-down.end { border-top-color: #d64545; }
+  #timeline-labels-toggle {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 14px;
+    height: 14px;
+    background: #3a3d45;
+    color: var(--muted);
+    border-radius: 3px;
+    text-align: center;
+    line-height: 14px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 10px;
+  }
+  #timeline-labels-toggle:hover { background: #4a4d55; }
   #timeline-svg {
-    width: 100%;
+    flex: 1 1 auto;
     background: var(--panel-2);
     display: block;
+    height: 220px;
   }
   #timeline-legend {
     padding: 6px 12px;
@@ -244,6 +455,23 @@ _INDEX_HTML = """<!doctype html>
   #timeline-legend .swatch {
     display: inline-block; width: 10px; height: 10px;
     border-radius: 2px; margin-right: 4px; vertical-align: middle;
+  }
+  /* Swatch variants — shapes that mirror what the SVG actually draws,
+     so legend ≈ what you see in the timeline. */
+  #timeline-legend .swatch-rect   { width: 14px; height: 6px; border-radius: 1px; }
+  #timeline-legend .swatch-stick  { width: 1px; height: 10px; }
+  #timeline-legend .swatch-circle { width: 8px; height: 8px; border-radius: 50%; }
+  #timeline-legend .swatch-tri {
+    width: 0; height: 0; background: none;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid transparent;
+    border-radius: 0;
+  }
+  #timeline-legend .swatch-tri.tri-green { border-top-color: #6abf4b; }
+  #timeline-legend .swatch-tri.tri-red   { border-top-color: #d64545; }
+  #timeline-legend .swatch-flag {
+    width: auto; height: auto; background: none !important; border-radius: 0;
+    font-size: 12px; line-height: 1;
   }
 </style>
 </head>
@@ -271,20 +499,6 @@ _INDEX_HTML = """<!doctype html>
       <div id="transcript" class="empty copyable" title="click to copy full transcript tail">no audio yet</div>
     </div>
   </section>
-  <section id="timeline-section" class="collapsible" data-state="collapsed">
-    <h2><span class="chev">▸</span>Debug timeline</h2>
-    <div class="body" id="timeline-body">
-      <div id="timeline-legend">
-        <span><span class="swatch" style="background:#5fa8d3"></span>audio window</span>
-        <span><span class="swatch" style="background:#6abf4b"></span>segment</span>
-        <span><span class="swatch" style="background:#7e57c2"></span>word</span>
-        <span><span class="swatch" style="background:#f0a04b"></span>press / marker</span>
-        <span><span class="swatch" style="background:#d64545"></span>paste</span>
-        <span class="muted" id="timeline-window-label"></span>
-      </div>
-      <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
-    </div>
-  </section>
   <section id="events-section" class="collapsible" data-state="collapsed">
     <h2><span class="chev">▸</span>Recent events</h2>
     <div class="body" id="events-body">
@@ -297,11 +511,297 @@ _INDEX_HTML = """<!doctype html>
         <span class="chip on" data-kind="cursor_capture">cursor_capture</span>
         <span class="chip on" data-kind="paste">paste</span>
         <span class="chip on" data-kind="mute">mute</span>
+        <span class="chip on" data-kind="debug_flag">🚩 debug_flag</span>
       </div>
       <div id="events-table" class="copyable" title="click to copy all visible events"><div class="empty">no events yet</div></div>
     </div>
   </section>
+  <section id="timeline-section" class="collapsible" data-state="expanded">
+    <h2><span class="chev">▸</span>Debug timeline</h2>
+    <div class="body" id="timeline-body">
+      <div id="timeline-legend">
+        <span><span class="swatch swatch-rect" style="background:#6abf4b"></span>segment bar</span>
+        <span><span class="swatch swatch-stick" style="background:#7e57c2"></span>word tick</span>
+        <span><span class="swatch swatch-tri tri-green"></span><span class="swatch swatch-tri tri-red"></span>press (start / end)</span>
+        <span><span class="swatch swatch-circle" style="background:#f0a04b"></span>marker</span>
+        <span><span class="swatch swatch-circle" style="background:#c792ea"></span>cursor capture</span>
+        <span><span class="swatch swatch-rect" style="background:#d64545"></span>paste</span>
+        <span><span class="swatch swatch-flag" style="color:#ff5252">🚩</span>debug flag</span>
+        <span class="muted" id="timeline-window-label"></span>
+      </div>
+      <div class="timeline-controls">
+        <label class="filter-label">stream:</label>
+        <span class="chip on stream-fast" data-stream="fast">fast</span>
+        <span class="chip on stream-hq" data-stream="hq">hq</span>
+        <span class="chip-sep"></span>
+        <label class="filter-label">audio_window:</label>
+        <span class="legend-swatch" style="background:#5fa8d3" title="VAD found a silence boundary → window cut and accepted"></span><span class="legend-lbl" title="VAD found a silence boundary → window cut and accepted">silence-cut</span>
+        <span class="legend-swatch" style="background:#ec407a" title="Hit the max_window_seconds cap (no silence found in time) → window force-cut"></span><span class="legend-lbl" title="Hit the max_window_seconds cap (no silence found in time) → window force-cut">max_window</span>
+        <span class="legend-swatch" style="background:#ffa726" title="Aggregator flushed early because a clipboard-window end-press requested an immediate flush"></span><span class="legend-lbl" title="Aggregator flushed early because a clipboard-window end-press requested an immediate flush">forced (end-press flush)</span>
+        <span class="legend-swatch" style="background:#3a3d45;border-top:2px solid #ff5252" title="Window dropped because voiced_ms or voiced_frac fell below the VAD gating thresholds — not enough speech to bother transcribing"></span><span class="legend-lbl" title="Window dropped because voiced_ms or voiced_frac fell below the VAD gating thresholds">⚠S dropped (silent gate)</span>
+        <span class="legend-swatch" style="background:#d64545;border-top:2px solid #ff5252" title="Window dropped because the transcriber's input queue was full — the transcriber is falling behind realtime (typically HQ during cold-start or backlog)"></span><span class="legend-lbl" title="Window dropped because the transcriber's input queue was full">⛔Q dropped (queue full)</span>
+      </div>
+      <div class="timeline-row">
+        <div id="timeline-labels">
+          <span id="timeline-labels-toggle" title="hide/show labels">‹</span>
+          <!-- Each label's `top` = (bar-center y) - (font_size/2).
+               With line-height:1 and explicit font sizes that gives
+               text-center == bar-center.
+               Bar geometry in the SVG (height: 220px, viewBox y match):
+                 win  fast 20-28  (center 24) → font 9 → top 20
+                 win  hq   30-38  (center 34) → top 30
+                 seg  fast 46-54  (center 50) → top 46
+                 seg  hq   66-74  (center 70) → top 66
+                 paste    95-115  (center 105) → top 101
+                 marker   y=140 circle r=4    → top 136
+                 cursor   y=166 circle r=3    → top 162
+               Group headers (font 7) live in the gaps between bands. -->
+          <span class="row-label" style="top: 4px"><span class="press-tri-down"></span><span class="press-tri-down end"></span> Press</span>
+          <span class="row-label group" style="top: 12px">Windows</span>
+          <span class="row-label sub"   style="top: 20px">Fast</span>
+          <span class="row-label sub"   style="top: 30px">HQ</span>
+          <span class="row-label group" style="top: 39px">Segments</span>
+          <span class="row-label sub"   style="top: 46px">Fast</span>
+          <span class="row-label sub"   style="top: 66px">HQ</span>
+          <span class="row-label"       style="top: 101px">Paste</span>
+          <span class="row-label"       style="top: 136px">Marker</span>
+          <span class="row-label"       style="top: 162px">Cursor capture</span>
+        </div>
+        <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+  </section>
 </main>
+
+<button id="settings-gear" title="Settings" aria-label="Open settings">⚙</button>
+
+<div id="settings-overlay" hidden>
+  <div id="settings-modal" role="dialog" aria-labelledby="settings-title">
+    <header>
+      <h3 id="settings-title">Settings</h3>
+      <button id="settings-close" aria-label="Close">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="hint">
+        Model / beam / prev-text changes hot-swap live (brief pause while the
+        new model loads). Other fields apply on next launch.
+      </p>
+
+      <fieldset>
+        <legend>General</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hf_hub_offline">
+          Skip HuggingFace update check at model load
+          <span class="deferred-note">(uncheck to allow downloads — slows startup; requires restart)</span>
+        </label>
+        <label>Chunk token target
+          <input type="number" min="100" max="20000" step="100" data-path="persistent.chunk_token_target">
+        </label>
+        <label>Paste delay (s)
+          <input type="number" step="0.05" min="0" max="2" data-path="paste.delay">
+        </label>
+        <label>Paste drain timeout (s)
+          <input type="number" step="0.5" min="1" max="60" data-path="paste.drain_timeout">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.debug_recording">
+          Record debug events + status snapshots for replay
+          <span class="deferred-note">(applies on next launch)</span>
+        </label>
+        <label>Snapshot interval (s)
+          <input type="number" step="0.5" min="0.5" max="60" data-path="persistent.debug_snapshot_interval_s">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Audio capture</legend>
+        <label>Sample rate (Hz)
+          <input type="number" min="8000" max="48000" step="1000" data-path="audio.sample_rate">
+        </label>
+        <label>Channels
+          <input type="number" min="1" max="2" data-path="audio.channels">
+        </label>
+        <label>Format
+          <select data-path="audio.format">
+            <option>int16</option><option>int32</option><option>float32</option>
+          </select>
+        </label>
+        <label>Chunk size (frames)
+          <input type="number" min="64" max="8192" step="64" data-path="audio.chunk_size">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>VAD &amp; gating</legend>
+        <label>Silence ms
+          <input type="number" min="100" max="5000" step="50" data-path="vad.silence_ms">
+        </label>
+        <label>Aggressiveness (0–3)
+          <input type="number" min="0" max="3" data-path="vad.aggressiveness">
+        </label>
+        <label>Min voiced ms
+          <input type="number" min="0" max="5000" step="50" data-path="vad.min_voiced_ms">
+        </label>
+        <label>Min voiced fraction (0–1)
+          <input type="number" min="0" max="1" step="0.05" data-path="vad.min_voiced_frac">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Fast stream</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.fast.enabled">
+          Enabled
+        </label>
+        <label>Model
+          <select data-path="persistent.fast.fw.model">
+            <option>tiny.en</option><option>base.en</option>
+            <option>small.en</option><option>medium.en</option>
+            <option>large-v3</option><option>distil-large-v3</option>
+          </select>
+        </label>
+        <label>Compute type
+          <select data-path="persistent.fast.fw.compute">
+            <option>int8</option><option>int8_float16</option>
+            <option>float16</option><option>float32</option>
+          </select>
+        </label>
+        <label>Device
+          <select data-path="persistent.fast.fw.device">
+            <option value="">auto-detect</option>
+            <option>cpu</option><option>cuda</option>
+          </select>
+        </label>
+        <label>Beam size
+          <input type="number" min="1" max="10" data-path="persistent.fast.fw.beam_size">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.fast.fw.condition_on_previous_text">
+          Condition on previous text
+        </label>
+        <label>No-speech threshold
+          <input type="number" min="0" max="1" step="0.05" data-path="persistent.fast.fw.no_speech_threshold">
+        </label>
+        <label>Log-prob threshold
+          <input type="number" step="0.1" data-path="persistent.fast.fw.log_prob_threshold">
+        </label>
+        <label>Max window seconds
+          <input type="number" step="0.1" min="5" max="120" data-path="persistent.fast.max_window_seconds">
+        </label>
+        <label>Window queue maxsize (drops on full)
+          <input type="number" min="1" max="512" data-path="persistent.fast.window_q_maxsize">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>HQ stream (background, higher quality)</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hq.enabled">
+          Enable HQ stream
+        </label>
+        <label>Model
+          <select data-path="persistent.hq.fw.model">
+            <option>tiny.en</option><option>base.en</option>
+            <option>small.en</option><option>medium.en</option>
+            <option>large-v3</option><option>distil-large-v3</option>
+          </select>
+        </label>
+        <label>Compute type
+          <select data-path="persistent.hq.fw.compute">
+            <option>int8</option><option>int8_float16</option>
+            <option>float16</option><option>float32</option>
+          </select>
+        </label>
+        <label>Device
+          <select data-path="persistent.hq.fw.device">
+            <option value="">auto-detect</option>
+            <option>cpu</option><option>cuda</option>
+          </select>
+        </label>
+        <label>Beam size
+          <input type="number" min="1" max="10" data-path="persistent.hq.fw.beam_size">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hq.fw.condition_on_previous_text">
+          Condition on previous text
+        </label>
+        <label>No-speech threshold
+          <input type="number" min="0" max="1" step="0.05" data-path="persistent.hq.fw.no_speech_threshold">
+        </label>
+        <label>Log-prob threshold
+          <input type="number" step="0.1" data-path="persistent.hq.fw.log_prob_threshold">
+        </label>
+        <label>Max window seconds
+          <input type="number" step="0.1" min="5" max="240" data-path="persistent.hq.max_window_seconds">
+        </label>
+        <label>Window queue maxsize (drops on full)
+          <input type="number" min="1" max="512" data-path="persistent.hq.window_q_maxsize">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ports</legend>
+        <label>Widget port (0 = ephemeral)
+          <input type="number" min="0" max="65535" data-path="persistent.widget_port">
+        </label>
+        <label>Transcript stream port
+          <input type="number" min="0" max="65535" data-path="persistent.transcript_stream_port">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Markers</legend>
+        <p class="hint" style="margin:0 0 8px">
+          Hotkey keys that toggle annotation markers in the transcript.
+        </p>
+        <table id="markers-table" style="width:100%;font-size:12px;border-collapse:collapse">
+          <thead>
+            <tr style="color:var(--muted);text-align:left">
+              <th style="width:50px">Key</th>
+              <th style="width:140px">Type</th>
+              <th>Description</th>
+              <th style="width:32px"></th>
+            </tr>
+          </thead>
+          <tbody id="markers-tbody"></tbody>
+        </table>
+        <button type="button" id="markers-add"
+                style="margin-top:6px;padding:4px 10px;background:#3a3d45;color:#fff;border:none;border-radius:4px;cursor:pointer">+ Add marker</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>Hotkeys</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="hotkeys.no_modifiers">
+          Bare double-tap (no modifier keys held)
+        </label>
+        <label>Modifiers (comma-separated)
+          <input type="text" data-path="hotkeys.modifiers" data-kind="list">
+        </label>
+        <label>Toggle recording key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.toggle_recording">
+        </label>
+        <label>Discard recording key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.discard_recording">
+        </label>
+        <label>Toggle aside key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.toggle_aside">
+        </label>
+      </fieldset>
+
+      <details>
+        <summary>Raw JSON (advanced)</summary>
+        <textarea id="settings-json" spellcheck="false"></textarea>
+      </details>
+    </div>
+    <footer>
+      <span id="settings-status"></span>
+      <button id="settings-reload">Reload current</button>
+      <button id="settings-save" class="primary">Save &amp; apply</button>
+    </footer>
+  </div>
+</div>
+
 <script>
 (function() {
   const $ = (id) => document.getElementById(id);
@@ -374,24 +874,52 @@ _INDEX_HTML = """<!doctype html>
   }
 
   let lastTranscript = '';
-  function renderTranscript(text) {
+  function renderSpanHtml(text, sourceClass) {
+    const escaped = escape(text);
+    const withMarkers = escaped.replace(MARKER_RE, (m, type, kind) => {
+      const cls = ['marker-pill', type].join(' ');
+      return `<span class="${cls}" title="${type}:${kind}">${type}:${kind}</span>`;
+    });
+    return `<span class="${sourceClass}">${withMarkers}</span>`;
+  }
+  function renderTranscript(s) {
     const el = $('transcript');
     const body = $('transcript-body');
     attachScrollWatcher(body);
-    lastTranscript = text || '';
-    if (!text) {
+    // Prefer merged spans when the HQ stream is producing them; fall back
+    // to the plain fast tail otherwise.
+    const spans = s.transcript_tail_merged;
+    const plain = s.transcript_tail || '';
+    const isEmpty = spans
+      ? spans.every(sp => !sp.text)
+      : !plain;
+    lastTranscript = spans
+      ? spans.map(sp => sp.text).join(' ')
+      : plain;
+    if (isEmpty) {
       el.className = 'empty copyable';
       el.textContent = 'no audio yet';
       return;
     }
     el.className = 'copyable';
     el.title = 'click to copy full transcript tail';
-    const escaped = escape(text);
-    const html = escaped.replace(MARKER_RE, (m, type, kind) => {
-      const cls = ['marker-pill', type].join(' ');
-      return `<span class="${cls}" title="${type}:${kind}">${type}:${kind}</span>`;
-    });
-    el.innerHTML = html;
+    if (spans && spans.length) {
+      const parts = [];
+      for (let i = 0; i < spans.length; i++) {
+        const sp = spans[i];
+        if (i > 0 && spans[i - 1].source === 'hq' && sp.source === 'fast') {
+          const edgeSec = s.hq && s.hq.leading_edge_seconds != null
+            ? s.hq.leading_edge_seconds.toFixed(1) + 's'
+            : '';
+          parts.push(`<span class="hq-edge" title="HQ leading edge">HQ→${edgeSec}</span>`);
+        }
+        const cls = sp.source === 'hq' ? 'src-hq' : 'src-fast';
+        parts.push(renderSpanHtml(sp.text || '', cls));
+      }
+      el.innerHTML = parts.join(' ');
+    } else {
+      el.innerHTML = renderSpanHtml(plain, 'src-fast');
+    }
     pinToBottomIfStuck(body);
   }
   // Single delegated click handler for the transcript element.
@@ -435,8 +963,25 @@ _INDEX_HTML = """<!doctype html>
   }
 
   function renderHeader(s) {
-    $('meta').textContent =
-      `${s.session_id} · ${s.model} (${s.device}) · ${s.chunk_count} chunk(s)`;
+    let meta = `${s.session_id} · ${s.model} (${s.device}) · ${s.chunk_count} chunk(s)`;
+    if (s.hq) {
+      const now = s.now_seconds || 0;
+      const edge = s.hq.leading_edge_seconds || 0;
+      const lag = Math.max(0, now - edge);
+      meta += ` · HQ:${s.hq.model.replace(/^faster-whisper:/, '')} (lag ${lag.toFixed(1)}s)`;
+    }
+    // Per-stream drop counters. Only render when something has actually
+    // been dropped so the header stays clean in healthy sessions.
+    if (s.stream_stats) {
+      for (const label of Object.keys(s.stream_stats)) {
+        const st = s.stream_stats[label];
+        const totalDrops = (st.dropped_queue_full || 0) + (st.dropped_silent || 0);
+        if (totalDrops > 0) {
+          meta += ` · ⚠ ${label} dropped ${st.dropped_queue_full || 0}q+${st.dropped_silent || 0}s`;
+        }
+      }
+    }
+    $('meta').textContent = meta;
     const cap = $('capture');
     cap.textContent = s.capture.mode;
     cap.className = 'pill ' + (s.capture.mode === 'r+aside' ? 'r-aside' : s.capture.mode);
@@ -459,8 +1004,13 @@ _INDEX_HTML = """<!doctype html>
   }
 
   // ---- Debug events ---------------------------------------------------
-  const EVENT_KINDS = ['audio_window','segment','press','marker','cursor_capture','paste','mute'];
+  const EVENT_KINDS = ['audio_window','segment','press','marker','cursor_capture','paste','mute','debug_flag'];
   const enabledKinds = new Set(EVENT_KINDS);
+  // Stream filter — events tagged with data.stream get filtered by this.
+  // Events without a stream tag (press, marker, paste, debug_flag) are
+  // unaffected by stream filtering and always render when their kind is on.
+  const STREAMS = ['fast','hq'];
+  const enabledStreams = new Set(STREAMS);
   document.querySelectorAll('.chip[data-kind]').forEach(c => {
     c.addEventListener('click', () => {
       const k = c.dataset.kind;
@@ -468,6 +1018,27 @@ _INDEX_HTML = """<!doctype html>
       else { enabledKinds.add(k); c.classList.add('on'); }
     });
   });
+  document.querySelectorAll('.chip[data-stream]').forEach(c => {
+    c.addEventListener('click', () => {
+      const s = c.dataset.stream;
+      if (enabledStreams.has(s)) { enabledStreams.delete(s); c.classList.remove('on'); }
+      else { enabledStreams.add(s); c.classList.add('on'); }
+    });
+  });
+  // Timeline label gutter collapse/expand.
+  const _labelsToggle = document.getElementById('timeline-labels-toggle');
+  if (_labelsToggle) {
+    _labelsToggle.addEventListener('click', () => {
+      const gutter = document.getElementById('timeline-labels');
+      const collapsed = gutter.classList.toggle('collapsed');
+      _labelsToggle.textContent = collapsed ? '›' : '‹';
+    });
+  }
+  function passesStreamFilter(e) {
+    const st = e.data && e.data.stream;
+    if (!st) return true;
+    return enabledStreams.has(st);
+  }
 
   function summarize(evt) {
     const d = evt.data || {};
@@ -505,7 +1076,9 @@ _INDEX_HTML = """<!doctype html>
       lastEventsRendered = [];
       return;
     }
-    const filtered = events.filter(e => enabledKinds.has(e.kind)).slice(-300);
+    const filtered = events
+      .filter(e => enabledKinds.has(e.kind) && passesStreamFilter(e))
+      .slice(-300);
     lastEventsRendered = filtered;
     const rows = filtered.map(e => (
       `<tr class="kind-${e.kind}">` +
@@ -561,30 +1134,84 @@ _INDEX_HTML = """<!doctype html>
       parts.push(`<text x="${xx+2}" y="${H-4}" fill="#8a8d97" font-size="10">${t.toFixed(0)}s</text>`);
     }
 
+    // Sub-row y-coordinates per stream for stream-tagged events.
+    // Layout: audio fast/hq stacked, then segment fast (bar + words below),
+    // then segment hq (bar + words below), then paste/marker/cursor unchanged.
+    const ROWS = {
+      audio_window: { fast: 20, hq: 30, h: 8 },
+      segment:      { fast: 46, hq: 66, h: 8 },
+      word:         { fast: 55, hq: 75, h: 5 },
+    };
+    // Lane separators only — band labels live in the HTML side panel to
+    // the left, so they don't visually compete with the bars themselves.
+    parts.push(`<line x1="0" y1="42" x2="${W}" y2="42" stroke="#1b1d23" stroke-width="0.5"/>`);
+    parts.push(`<line x1="0" y1="62" x2="${W}" y2="62" stroke="#1b1d23" stroke-width="0.5" stroke-dasharray="2,3"/>`);
+
     for (const e of events) {
       const d = e.data || {};
+      const stream = d.stream === 'hq' ? 'hq' : 'fast';
+      // Apply stream filter for stream-tagged events.
+      if (d.stream && !enabledStreams.has(stream)) continue;
       if (e.kind === 'audio_window' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
+        const yRow = ROWS.audio_window[stream];
+        const hRow = ROWS.audio_window.h;
+        const isDrop = d.reason && d.reason.startsWith('dropped');
         const fill = d.reason === 'forced' ? '#ffa726'
                    : d.reason === 'silence' ? '#5fa8d3'
                    : d.reason === 'max_window' ? '#ec407a'
                    : d.reason === 'dropped_silent' ? '#3a3d45'
                    : d.reason === 'dropped_queue_full' ? '#d64545'
                    : '#5fa8d3';
-        const opacity = d.reason && d.reason.startsWith('dropped') ? 0.4 : 0.85;
-        parts.push(`<rect x="${x0}" y="20" width="${x1-x0}" height="20" fill="${fill}" opacity="${opacity}"><title>${escape(summarize(e))}</title></rect>`);
+        const opacity = isDrop ? 0.6 : 0.85;
+        const title = escape(summarize(e));
+        // Dropped windows: solid bar with a thick red top stroke (visible
+        // even at 1-pixel bar width) and a contrast-on-dark glyph anchored
+        // ABOVE the bar so very narrow bars don't get visually swallowed
+        // by their own marker. Avoid diagonal cross-strokes — they look
+        // like a filled box at small widths.
+        parts.push(`<rect x="${x0}" y="${yRow}" width="${x1-x0}" height="${hRow}" fill="${fill}" opacity="${opacity}"><title>${title}</title></rect>`);
+        if (stream === 'hq' && !isDrop) {
+          // Teal dotted top stripe distinguishes HQ bars from fast bars
+          // without changing the reason color. Skipped on drops because
+          // the red top stroke is already a stronger differentiator.
+          parts.push(`<line x1="${x0}" y1="${yRow+0.5}" x2="${x1}" y2="${yRow+0.5}" stroke="#26a69a" stroke-width="1" stroke-dasharray="2,2"/>`);
+        }
+        if (isDrop) {
+          parts.push(`<line x1="${x0}" y1="${yRow-0.5}" x2="${x1}" y2="${yRow-0.5}" stroke="#ff5252" stroke-width="2"><title>${title}</title></line>`);
+          const sym = d.reason === 'dropped_queue_full' ? '⛔Q' : '⚠S';
+          // Place the glyph slightly ABOVE the bar and ALWAYS at the bar's
+          // x-start, regardless of bar width, so even a 2-pixel bar is
+          // unambiguously labeled.
+          parts.push(`<text x="${x0}" y="${yRow-2}" fill="#ff5252" font-size="10" font-weight="bold"><title>${title}</title>${sym}</text>`);
+        }
       } else if (e.kind === 'segment' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
-        parts.push(`<rect x="${x0}" y="50" width="${x1-x0}" height="20" fill="#6abf4b" opacity="0.7"><title>${escape(summarize(e))}</title></rect>`);
+        const yRow = ROWS.segment[stream];
+        const hRow = ROWS.segment.h;
+        // Same green for both streams — stream identity is conveyed by
+        // row position. HQ rect gets a thin dotted top border so the
+        // bar shape itself is also distinct, not just its location.
+        parts.push(`<rect x="${x0}" y="${yRow}" width="${x1-x0}" height="${hRow}" fill="#6abf4b" opacity="0.7"><title>${escape(summarize(e))}</title></rect>`);
+        if (stream === 'hq') {
+          parts.push(`<line x1="${x0}" y1="${yRow+0.5}" x2="${x1}" y2="${yRow+0.5}" stroke="#26a69a" stroke-width="1" stroke-dasharray="2,2"/>`);
+        }
+        const wordY = ROWS.word[stream];
         for (const w of (d.words||[])) {
           const wx = x(w.s);
-          parts.push(`<line x1="${wx}" y1="75" x2="${wx}" y2="83" stroke="#7e57c2" stroke-width="1"><title>${escape(w.text)} [${w.s.toFixed(2)}–${w.e.toFixed(2)}] p=${w.p}</title></line>`);
+          parts.push(`<line x1="${wx}" y1="${wordY}" x2="${wx}" y2="${wordY+ROWS.word.h}" stroke="#7e57c2" stroke-width="1"><title>${escape(w.text)} [${w.s.toFixed(2)}–${w.e.toFixed(2)}] p=${w.p}</title></line>`);
         }
       } else if (e.kind === 'press') {
         const xx = x(d.session_time);
         const stroke = d.phase === 'start' ? '#6abf4b' : d.phase === 'end' ? '#d64545' : '#f0a04b';
-        parts.push(`<line x1="${xx}" y1="0" x2="${xx}" y2="${H-15}" stroke="${stroke}" stroke-width="2" opacity="0.8"><title>${escape(summarize(e))}</title></line>`);
-        parts.push(`<text x="${xx+2}" y="12" fill="${stroke}" font-size="10">${d.key}/${d.phase}</text>`);
+        const ttl = escape(summarize(e));
+        // Distinct shape signature: a downward triangle ▼ anchored at the
+        // very top, plus a dashed line spanning the timeline. The
+        // triangle is the unambiguous "press" icon — it can't be confused
+        // with a forced/silence/max audio_window bar.
+        parts.push(`<polygon points="${xx-4},2 ${xx+4},2 ${xx},10" fill="${stroke}"><title>${ttl}</title></polygon>`);
+        parts.push(`<line x1="${xx}" y1="10" x2="${xx}" y2="${H-15}" stroke="${stroke}" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.7"><title>${ttl}</title></line>`);
+        parts.push(`<text x="${xx+6}" y="18" fill="${stroke}" font-size="10">${d.key}/${d.phase}</text>`);
       } else if (e.kind === 'paste') {
         const x0 = x(d.start_press_time), x1 = Math.max(x(d.end_press_time), x0+1);
         parts.push(`<rect x="${x0}" y="95" width="${x1-x0}" height="20" fill="#d64545" opacity="${d.timed_out?0.4:0.7}" stroke="#fff" stroke-width="0.5"><title>${escape(summarize(e))}</title></rect>`);
@@ -595,6 +1222,14 @@ _INDEX_HTML = """<!doctype html>
       } else if (e.kind === 'cursor_capture') {
         const xx = x(d.press_time);
         parts.push(`<circle cx="${xx}" cy="166" r="3" fill="#c792ea"><title>${escape(summarize(e))}</title></circle>`);
+      } else if (e.kind === 'debug_flag') {
+        // Tall red line spanning the full timeline height + a 🚩 glyph
+        // anchored at the top so flagged moments are unmistakable at any
+        // zoom level.
+        const xx = x(e.ts);
+        const title = escape(summarize(e));
+        parts.push(`<line x1="${xx}" y1="0" x2="${xx}" y2="${H}" stroke="#ff5252" stroke-width="2"><title>${title}</title></line>`);
+        parts.push(`<text x="${xx-6}" y="11" font-size="13"><title>${title}</title>🚩</text>`);
       }
     }
     svg.innerHTML = parts.join('');
@@ -613,7 +1248,7 @@ _INDEX_HTML = """<!doctype html>
       $('disconnected').style.display = 'none';
       renderHeader(s);
       renderPastes(s.paste_log);
-      renderTranscript(s.transcript_tail);
+      renderTranscript(s);
       renderEvents(s.debug_events || []);
       renderTimeline(s.debug_events || [], s.now_seconds || 0);
     } catch (e) {
@@ -632,6 +1267,151 @@ _INDEX_HTML = """<!doctype html>
     if (!document.hidden) poll();
   });
   window.addEventListener('focus', poll);
+
+  // ---- Settings: gear + modal -----------------------------------------
+  async function loadConfig() {
+    const r = await fetch('/config', { cache: 'no-store' });
+    if (!r.ok) throw new Error('GET /config ' + r.status);
+    return await r.json();
+  }
+  function setSettingsStatus(msg, isError) {
+    const el = $('settings-status');
+    el.textContent = msg;
+    el.style.color = isError ? 'var(--bad)' : 'var(--good)';
+  }
+  function getByPath(obj, path) {
+    return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+  }
+  function setByPath(obj, path, value) {
+    const parts = path.split('.');
+    let cur = obj;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object') {
+        cur[parts[i]] = {};
+      }
+      cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+  function fillFormFromConfig(cfg) {
+    document.querySelectorAll('#settings-modal [data-path]').forEach(el => {
+      const path = el.dataset.path;
+      const v = getByPath(cfg, path);
+      if (v === undefined) return;
+      if (el.type === 'checkbox') el.checked = !!v;
+      else if (el.dataset.kind === 'list' && Array.isArray(v)) el.value = v.join(', ');
+      else el.value = v;
+    });
+    renderMarkersTable(Array.isArray(cfg.markers) ? cfg.markers : []);
+    $('settings-json').value = JSON.stringify(cfg, null, 2);
+  }
+  function buildPatchFromForm() {
+    // Send only the structured-form fields. The advanced JSON textarea is
+    // a read-only mirror unless the user expanded it (in which case we
+    // merge it as base and overlay the form values on top).
+    let patch = {};
+    const raw = $('settings-json').value.trim();
+    if (raw) {
+      try { patch = JSON.parse(raw); } catch (e) { /* fall through */ }
+    }
+    document.querySelectorAll('#settings-modal [data-path]').forEach(el => {
+      const path = el.dataset.path;
+      let v;
+      if (el.type === 'checkbox') v = el.checked;
+      else if (el.type === 'number') v = el.value === '' ? null : Number(el.value);
+      else if (el.dataset.kind === 'list') {
+        v = el.value.split(',').map(s => s.trim()).filter(Boolean);
+      } else v = el.value;
+      if (v === null) return;
+      setByPath(patch, path, v);
+    });
+    patch.markers = readMarkersTable();
+    return patch;
+  }
+  // ---- Markers table editor (dynamic rows) ----
+  function renderMarkersTable(markers) {
+    const tbody = $('markers-tbody');
+    tbody.innerHTML = '';
+    markers.forEach(m => tbody.appendChild(buildMarkerRow(m)));
+  }
+  function buildMarkerRow(m) {
+    const tr = document.createElement('tr');
+    const cellStyle = 'padding:3px 4px';
+    const inputStyle =
+      'width:100%;background:#15171c;color:var(--fg);' +
+      'border:1px solid #3a3d45;border-radius:3px;padding:3px 6px;' +
+      'font-size:12px;box-sizing:border-box';
+    tr.innerHTML =
+      `<td style="${cellStyle}"><input class="m-key" maxlength="1" value="${escape(m.key || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle}"><input class="m-type" value="${escape(m.type || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle}"><input class="m-desc" value="${escape(m.description || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle};text-align:center">` +
+      `<button type="button" class="m-del" title="remove" ` +
+      `style="background:transparent;border:none;color:var(--bad);cursor:pointer;font-size:16px;line-height:1">×</button></td>`;
+    tr.querySelector('.m-del').addEventListener('click', () => tr.remove());
+    return tr;
+  }
+  function readMarkersTable() {
+    const out = [];
+    $('markers-tbody').querySelectorAll('tr').forEach(tr => {
+      const key = tr.querySelector('.m-key').value.trim();
+      const type = tr.querySelector('.m-type').value.trim();
+      const description = tr.querySelector('.m-desc').value.trim();
+      if (key && type) out.push({ key, type, description });
+    });
+    return out;
+  }
+  $('markers-add').addEventListener('click', () => {
+    $('markers-tbody').appendChild(buildMarkerRow({ key: '', type: '', description: '' }));
+  });
+  async function refreshSettingsForm() {
+    try {
+      const cfg = await loadConfig();
+      fillFormFromConfig(cfg);
+      setSettingsStatus('loaded', false);
+    } catch (e) {
+      setSettingsStatus('load failed: ' + e.message, true);
+    }
+  }
+  function openSettings() {
+    $('settings-overlay').hidden = false;
+    refreshSettingsForm();
+  }
+  function closeSettings() {
+    $('settings-overlay').hidden = true;
+  }
+  $('settings-gear').addEventListener('click', openSettings);
+  $('settings-close').addEventListener('click', closeSettings);
+  $('settings-overlay').addEventListener('click', (ev) => {
+    if (ev.target === $('settings-overlay')) closeSettings();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !$('settings-overlay').hidden) closeSettings();
+  });
+  $('settings-reload').addEventListener('click', refreshSettingsForm);
+  $('settings-save').addEventListener('click', async () => {
+    const patch = buildPatchFromForm();
+    setSettingsStatus('saving…', false);
+    try {
+      const r = await fetch('/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const result = await r.json();
+      if (!r.ok || result.error) {
+        setSettingsStatus('error: ' + (result.error || r.status), true);
+        return;
+      }
+      const applied = (result.applied || []).join(', ') || '(no live changes)';
+      const deferred = (result.deferred || []).join(', ');
+      let msg = 'saved. live: ' + applied;
+      if (deferred) msg += '. deferred until restart: ' + deferred;
+      setSettingsStatus(msg, false);
+    } catch (e) {
+      setSettingsStatus('error: ' + e.message, true);
+    }
+  });
 })();
 </script>
 </body>
@@ -652,6 +1432,15 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
+    def _send_json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/" or self.path.startswith("/?"):
             body = _INDEX_HTML.encode("utf-8")
@@ -666,46 +1455,85 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 payload = self.server.snapshot_provider()  # type: ignore[attr-defined]
             except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                self._send_json(500, {"error": str(e)})
                 return
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, payload)
+            return
+        if self.path == "/config":
+            provider = getattr(self.server, "config_provider", None)
+            if provider is None:
+                self._send_json(404, {"error": "config not available"})
+                return
+            try:
+                self._send_json(200, provider())
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        self.send_error(404)
+
+    def do_PUT(self):  # noqa: N802
+        if self.path == "/config":
+            setter = getattr(self.server, "config_setter", None)
+            if setter is None:
+                self._send_json(404, {"error": "config update not available"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                new_data = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                self._send_json(400, {"error": f"bad JSON: {e}"})
+                return
+            try:
+                result = setter(new_data)
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+                return
+            self._send_json(200, {"ok": True, **(result or {})})
             return
         self.send_error(404)
 
 
 class _Server(ThreadingHTTPServer):
-    """Slight subclass that holds the snapshot provider for the handler."""
+    """Slight subclass that holds the snapshot/config callables for the handler."""
 
     daemon_threads = True
 
-    def __init__(self, addr, handler, snapshot_provider):
+    def __init__(self, addr, handler, snapshot_provider, config_provider=None,
+                 config_setter=None):
         super().__init__(addr, handler)
         self.snapshot_provider = snapshot_provider
+        self.config_provider = config_provider
+        self.config_setter = config_setter
 
 
 class StatusServer:
     """HTTP status server bound to a local port.
 
     The dashboard reads from ``snapshot_provider``, a zero-arg callable
-    returning a JSON-serializable dict.
+    returning a JSON-serializable dict. Optional ``config_provider`` and
+    ``config_setter`` enable the ``/config`` GET/PUT endpoints used by the
+    settings page in Phase 6.
     """
 
-    def __init__(self, snapshot_provider: Callable[[], dict]):
+    def __init__(
+        self,
+        snapshot_provider: Callable[[], dict],
+        config_provider: Optional[Callable[[], dict]] = None,
+        config_setter: Optional[Callable[[dict], Optional[dict]]] = None,
+    ):
         self._snapshot_provider = snapshot_provider
+        self._config_provider = config_provider
+        self._config_setter = config_setter
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self, host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
-        self._server = _Server((host, port), _Handler, self._snapshot_provider)
+        self._server = _Server(
+            (host, port), _Handler, self._snapshot_provider,
+            config_provider=self._config_provider,
+            config_setter=self._config_setter,
+        )
         bound_host, bound_port = self._server.server_address[:2]
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="StatusServer", daemon=True

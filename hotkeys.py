@@ -10,7 +10,6 @@ Houses:
 
 from __future__ import annotations
 
-import json
 import os
 import platform as _platform
 import time
@@ -49,29 +48,28 @@ _MODIFIER_MAP = {
 def load_config(path: Optional[str], here: Optional[str] = None) -> dict:
     """Load configuration from JSON file, falling back to local_config.json.
 
-    Args:
-        path: Explicit config path. If None, falls back to ``local_config.json``
-              next to ``here`` (or this file).
-        here: Directory to search for ``local_config.json``. Defaults to the
-              directory containing this module.
+    Returns the legacy shape ``{modifiers, keys, no_modifiers, persistent}``
+    so existing callers keep working. The data is pulled from the unified
+    ``runtime_config`` singleton (which itself reads from
+    ``local_config.json`` with env-var overrides). The ``path`` arg, when
+    given, is used to reload the unified config from a custom path —
+    otherwise the already-loaded singleton is returned.
 
-    Merges with DEFAULT_CONFIG so callers always see required keys.
+    The ``persistent.markers`` key remains supported as a place to put
+    user-configured marker types.
     """
-    if here is None:
-        here = os.path.dirname(__file__)
-    if path is None:
-        auto = os.path.join(here, "local_config.json")
-        path = auto if os.path.exists(auto) else None
-    if path is None:
-        return dict(DEFAULT_CONFIG)
-    with open(path) as f:
-        cfg = json.load(f)
-    merged = {
-        **DEFAULT_CONFIG,
-        **cfg,
-        "keys": {**DEFAULT_CONFIG["keys"], **cfg.get("keys", {})},
+    from runtime_config import CFG, load_runtime_config
+
+    if path is not None:
+        cfg = load_runtime_config(path=path, module_dir=here)
+    else:
+        cfg = CFG
+    return {
+        "modifiers": list(cfg.hotkeys.modifiers),
+        "keys": dict(cfg.hotkeys.keys),
+        "no_modifiers": cfg.hotkeys.no_modifiers,
+        "persistent": {"markers": list(cfg.markers)},
     }
-    return merged
 
 
 def key_char(key) -> Optional[str]:
