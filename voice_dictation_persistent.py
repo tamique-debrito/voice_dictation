@@ -277,7 +277,11 @@ class PersistentApp:
         # (and the persisted debug_events.jsonl) so post-session replay
         # can jump straight to "the moment something went wrong" instead
         # of grepping through the full timeline.
-        keys = set(self._marker_keys) | self.clipboard_mgr.keys() | {"x", "q", "m", "e"}
+        keys = (
+            set(self._marker_keys)
+            | self.clipboard_mgr.keys()
+            | {"x", "q", "m", CFG.persistent.debug_flag_key}
+        )
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
 
     def _request_force_flush_all(self) -> None:
@@ -594,8 +598,8 @@ class PersistentApp:
         elif char == "m":
             self._ack("mute toggle (m)")
             self._toggle_mute()
-        elif char == "e":
-            self._ack("error flag (e)")
+        elif char == CFG.persistent.debug_flag_key:
+            self._ack(f"error flag ({char})")
             self._flag_issue()
         elif char == "q":
             self._ack("quit (q)")

@@ -160,6 +160,10 @@ class PersistentConfig:
     # Seconds between status-snapshot writes during recording. Smaller =
     # finer replay temporal resolution; larger = less I/O.
     debug_snapshot_interval_s: float = 2.0
+    # Bare double-tap key that stamps a high-visibility ``debug_flag`` event
+    # into the timeline. Must not collide with marker keys, clipboard keys,
+    # or the other bare actions ({"x", "q", "m"}). Single character.
+    debug_flag_key: str = "e"
     fast: StreamConfig = field(default_factory=StreamConfig)
     hq: StreamConfig = field(default_factory=_default_hq_stream)
 
