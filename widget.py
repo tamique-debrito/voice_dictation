@@ -82,7 +82,24 @@ _INDEX_HTML = """<!doctype html>
   body.is-muted { box-shadow: inset 0 0 0 3px #e7c84a; }
   body.is-muted header { background: #3a341a; }
 
-  #disconnected {
+  /* Staleness chip: a small inline indicator next to the title that shows
+     how old the displayed data is. Replaces the old binary "disconnected"
+     banner that flipped on a single failed fetch. We only ever blank panels
+     once data is truly long-stale (see #stale-banner). */
+  #staleness {
+    display: none;
+    margin-left: 8px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    vertical-align: middle;
+  }
+  #staleness.live  { display: none; }
+  #staleness.soft  { display: inline-block; background: #3a3d45; color: var(--muted); }
+  #staleness.warn  { display: inline-block; background: #6a5a1a; color: #f0e2a5; }
+  #staleness.alert { display: inline-block; background: #6a3a1a; color: #ffd2a8; }
+  #stale-banner {
     display: none;
     background: var(--bad);
     color: white;
@@ -479,6 +496,7 @@ _INDEX_HTML = """<!doctype html>
 <header>
   <div>
     <span class="title">🎤 Persistent Monitoring</span>
+    <span id="staleness"></span>
     <span class="meta" id="meta"></span>
   </div>
   <div>capture: <span id="capture" class="pill passive">passive</span></div>
@@ -486,7 +504,7 @@ _INDEX_HTML = """<!doctype html>
   <div><span id="mute" class="pill muted" style="display:none">MUTED</span></div>
   <div class="meta" id="uptime"></div>
 </header>
-<div id="disconnected">⚠ disconnected from monitoring service</div>
+<div id="stale-banner">⚠ disconnected from monitoring service</div>
 <div id="copy-toast">copied</div>
 <main>
   <section id="pastes-section" class="collapsible" data-state="collapsed">
@@ -1235,34 +1253,72 @@ _INDEX_HTML = """<!doctype html>
     svg.innerHTML = parts.join('');
   }
 
+  // Track when we last got a successful snapshot. The staleness chip is
+  // rendered off this timestamp by a separate 250ms tick that runs
+  // independently of the fetch loop, so a single slow/failed poll never
+  // flips a binary banner — the UI only complains when data is actually old.
+  let lastSnapshotClientTime = Date.now();
+  let pollInflight = false;
+
   async function poll() {
-    // Abort hung polls so a wedged keep-alive connection can't permanently
-    // jam the per-origin pool (manifests as a stuck "disconnected" banner
-    // that hard-refresh can't recover from, but a new browser can).
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 2000);
+    // Drop the AbortController — with HTTP/1.1 keep-alive and a
+    // server-side snapshot cache, every /status response is microseconds.
+    // Aborting mid-flight was what polluted the browser's per-origin socket
+    // pool and produced the "(canceled)" cascade in the first place.
+    if (pollInflight) return;  // coalesce overlapping ticks (e.g. focus + interval)
+    pollInflight = true;
     try {
-      const r = await fetch('/status', { cache: 'no-store', signal: ctrl.signal });
+      const r = await fetch('/status', { cache: 'no-store' });
       if (!r.ok) throw new Error('status ' + r.status);
       const s = await r.json();
-      $('disconnected').style.display = 'none';
+      lastSnapshotClientTime = Date.now();
+      $('stale-banner').style.display = 'none';
       renderHeader(s);
       renderPastes(s.paste_log);
       renderTranscript(s);
       renderEvents(s.debug_events || []);
       renderTimeline(s.debug_events || [], s.now_seconds || 0);
     } catch (e) {
-      $('disconnected').style.display = 'block';
+      console.warn('poll failed:', e);
     } finally {
-      clearTimeout(tid);
+      pollInflight = false;
     }
   }
+
+  function renderStaleness() {
+    const ageMs = Date.now() - lastSnapshotClientTime;
+    const ageS = ageMs / 1000;
+    const el = $('staleness');
+    const banner = $('stale-banner');
+    if (ageS < 1.5) {
+      el.className = 'live';
+      el.textContent = '';
+      banner.style.display = 'none';
+    } else if (ageS < 5) {
+      el.className = 'soft';
+      el.textContent = 'updated ' + Math.round(ageS) + 's ago';
+      banner.style.display = 'none';
+    } else if (ageS < 30) {
+      el.className = 'warn';
+      el.textContent = 'stale ' + Math.round(ageS) + 's';
+      banner.style.display = 'none';
+    } else if (ageS < 120) {
+      el.className = 'alert';
+      el.textContent = 'reconnecting… ' + Math.round(ageS) + 's';
+      banner.style.display = 'none';
+    } else {
+      el.className = 'alert';
+      el.textContent = 'disconnected ' + Math.round(ageS) + 's';
+      banner.style.display = 'block';
+    }
+  }
+
   poll();
   setInterval(poll, 500);
-  // Background tabs get setInterval throttled to ~1/min on macOS, which
-  // leaves the "disconnected" banner stuck until the next throttled tick.
-  // Kick a fresh poll the moment the tab is visible or focused again so
-  // reconnection is instant on focus instead of waiting up to a minute.
+  setInterval(renderStaleness, 250);
+  // Backgrounded tabs throttle setInterval to ~1/min on macOS; kick a fresh
+  // poll on refocus so the staleness chip clears within ~one tick instead of
+  // waiting up to a minute. Cheap and harmless when not throttled.
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) poll();
   });
@@ -1420,6 +1476,13 @@ _INDEX_HTML = """<!doctype html>
 
 
 class _Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 + Content-Length on every response lets the browser keep one
+    # TCP socket open across all polls. Under HTTP/1.0 (the BaseHTTPRequestHandler
+    # default) every 500 ms poll opened a fresh connection, and any aborted
+    # fetch left a half-closed socket polluting the browser's per-origin pool —
+    # the root cause of the "(canceled)" cascades.
+    protocol_version = "HTTP/1.1"
+
     # Suppress per-request access logs — the 2 Hz poll would spam the console.
     def log_message(self, format, *args):
         return
@@ -1434,30 +1497,32 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send_bytes(code, "application/json; charset=utf-8", body)
+
+    def _send_bytes(self, code: int, content_type: str, body: bytes) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/" or self.path.startswith("/?"):
-            body = _INDEX_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_bytes(200, "text/html; charset=utf-8", _INDEX_HTML.encode("utf-8"))
             return
         if self.path == "/status":
-            try:
-                payload = self.server.snapshot_provider()  # type: ignore[attr-defined]
-            except Exception as e:
-                self._send_json(500, {"error": str(e)})
+            # Serve from the background snapshot cache — never call
+            # snapshot_provider() on the request thread, never take any app
+            # lock. Guarantees microsecond response regardless of in-process
+            # contention with the recorder/transcriber.
+            cache = self.server.snapshot_cache  # type: ignore[attr-defined]
+            body, err = cache.get_bytes()
+            if err is not None:
+                self._send_json(500, {"error": err})
                 return
-            self._send_json(200, payload)
+            self._send_bytes(200, "application/json; charset=utf-8", body)
             return
         if self.path == "/config":
             provider = getattr(self.server, "config_provider", None)
@@ -1494,15 +1559,74 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+class _SnapshotCache:
+    """Background-pumped cache of the latest status snapshot, serialized to bytes.
+
+    The pump thread calls ``snapshot_provider()`` at a fixed cadence and stores
+    the JSON-encoded payload. HTTP request handlers serve ``get_bytes()`` in
+    O(1) without ever invoking the provider — so a slow snapshot (e.g. brief
+    lock contention with the recorder/transcriber) can never block or abort a
+    client poll.
+    """
+
+    def __init__(self, snapshot_provider: Callable[[], dict], interval_s: float = 0.2):
+        self._snapshot_provider = snapshot_provider
+        self._interval_s = interval_s
+        self._lock = threading.Lock()
+        self._body: bytes = b'{"error":"snapshot not yet available"}'
+        self._error: Optional[str] = "snapshot not yet available"
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def get_bytes(self) -> tuple[bytes, Optional[str]]:
+        with self._lock:
+            return self._body, self._error
+
+    def refresh_now(self) -> None:
+        """Compute one snapshot synchronously and update the cache."""
+        try:
+            payload = self._snapshot_provider()
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            with self._lock:
+                self._body = body
+                self._error = None
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._error = str(e)
+
+    def start(self) -> None:
+        # Prime the cache synchronously so the very first client request after
+        # server start has real data rather than the placeholder error.
+        self.refresh_now()
+        self._thread = threading.Thread(
+            target=self._run, name="StatusSnapshotPump", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.refresh_now()
+            # Event.wait() returns True early if stop is signalled — gives a
+            # responsive shutdown without polling.
+            if self._stop.wait(self._interval_s):
+                return
+
+
 class _Server(ThreadingHTTPServer):
     """Slight subclass that holds the snapshot/config callables for the handler."""
 
     daemon_threads = True
 
-    def __init__(self, addr, handler, snapshot_provider, config_provider=None,
+    def __init__(self, addr, handler, snapshot_cache, config_provider=None,
                  config_setter=None):
         super().__init__(addr, handler)
-        self.snapshot_provider = snapshot_provider
+        self.snapshot_cache = snapshot_cache
         self.config_provider = config_provider
         self.config_setter = config_setter
 
@@ -1527,10 +1651,13 @@ class StatusServer:
         self._config_setter = config_setter
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
+        self._cache: Optional[_SnapshotCache] = None
 
     def start(self, host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
+        self._cache = _SnapshotCache(self._snapshot_provider)
+        self._cache.start()
         self._server = _Server(
-            (host, port), _Handler, self._snapshot_provider,
+            (host, port), _Handler, self._cache,
             config_provider=self._config_provider,
             config_setter=self._config_setter,
         )
@@ -1542,6 +1669,12 @@ class StatusServer:
         return bound_host, bound_port
 
     def stop(self) -> None:
+        if self._cache is not None:
+            try:
+                self._cache.stop()
+            except Exception:
+                pass
+            self._cache = None
         if self._server is not None:
             try:
                 self._server.shutdown()
