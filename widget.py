@@ -808,10 +808,6 @@ _INDEX_HTML = """<!doctype html>
         </label>
       </fieldset>
 
-      <details>
-        <summary>Raw JSON (advanced)</summary>
-        <textarea id="settings-json" spellcheck="false"></textarea>
-      </details>
     </div>
     <footer>
       <span id="settings-status"></span>
@@ -1380,17 +1376,9 @@ _INDEX_HTML = """<!doctype html>
       else el.value = v;
     });
     renderMarkersTable(Array.isArray(cfg.markers) ? cfg.markers : []);
-    $('settings-json').value = JSON.stringify(cfg, null, 2);
   }
   function buildPatchFromForm() {
-    // Send only the structured-form fields. The advanced JSON textarea is
-    // a read-only mirror unless the user expanded it (in which case we
-    // merge it as base and overlay the form values on top).
-    let patch = {};
-    const raw = $('settings-json').value.trim();
-    if (raw) {
-      try { patch = JSON.parse(raw); } catch (e) { /* fall through */ }
-    }
+    const patch = {};
     document.querySelectorAll('#settings-modal [data-path]').forEach(el => {
       const path = el.dataset.path;
       let v;
