@@ -615,10 +615,12 @@ class PersistentApp:
         events = self.timeline.insert_marker(key)
         if not events:
             return
+        audio_time = self.timeline.fast_high_watermark()
         for action, type_name in events:
             self._debug.log("marker", {
                 "type": type_name, "action": action, "key": key,
             })
+            self._stream_server.broadcast_marker(action, type_name, audio_time)
         for action, type_name in events:
             if action == "flag":
                 self._done(f"flagged [magenta]{type_name}[/magenta]")

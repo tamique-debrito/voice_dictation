@@ -30,11 +30,22 @@ class TranscriptStreamServer:
         finally:
             self._clients.discard(ws)
 
-    def broadcast(self, text: str, end_time: float) -> None:
+    def _send(self, payload: dict) -> None:
         if not self._clients or not self._loop:
             return
-        msg = json.dumps({"type": "transcript", "text": text, "end_time": end_time})
+        msg = json.dumps(payload)
         asyncio.run_coroutine_threadsafe(self._broadcast_all(msg), self._loop)
+
+    def broadcast(self, text: str, end_time: float) -> None:
+        self._send({"type": "transcript", "text": text, "end_time": end_time})
+
+    def broadcast_marker(self, action: str, marker_type: str, audio_time: float) -> None:
+        self._send({
+            "type": "marker",
+            "action": action,
+            "marker_type": marker_type,
+            "audio_time": audio_time,
+        })
 
     async def _broadcast_all(self, msg: str) -> None:
         dead = set()
