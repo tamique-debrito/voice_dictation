@@ -538,14 +538,14 @@ _INDEX_HTML = """<!doctype html>
     <h2><span class="chev">▸</span>Debug timeline</h2>
     <div class="body" id="timeline-body">
       <div id="timeline-legend">
-        <span><span class="swatch swatch-rect" style="background:#6abf4b"></span>segment bar</span>
-        <span><span class="swatch swatch-stick" style="background:#7e57c2"></span>word tick</span>
-        <span><span class="swatch swatch-tri tri-green"></span><span class="swatch swatch-tri tri-red"></span>press (start / end)</span>
-        <span><span class="swatch swatch-circle" style="background:#f0a04b"></span>marker</span>
-        <span><span class="swatch swatch-circle" style="background:#c792ea"></span>cursor capture</span>
-        <span><span class="swatch swatch-rect" style="background:#d64545"></span>paste</span>
-        <span><span class="swatch swatch-flag" style="color:#ff5252">🚩</span>debug flag</span>
-        <span class="muted" id="timeline-window-label"></span>
+        <span title="Transcribed audio window: horizontal bar spans the [start, end] audio time of one finalized segment. Hover the bar for the text."><span class="swatch swatch-rect" style="background:#6abf4b"></span>segment bar</span>
+        <span title="Individual word from a segment, anchored at the word's start time. Useful for spotting per-word timing within a segment."><span class="swatch swatch-stick" style="background:#7e57c2"></span>word tick</span>
+        <span title="Bare double-tap action key press: green = first tap (start), red = second tap (end). Each tap is logged whether or not it triggered an action."><span class="swatch swatch-tri tri-green"></span><span class="swatch swatch-tri tri-red"></span>press (start / end)</span>
+        <span title="Marker action: opened or closed a recording/aside marker (or a custom marker type from settings)."><span class="swatch swatch-circle" style="background:#f0a04b"></span>marker</span>
+        <span title="Cursor-position capture: records the focused app cursor location at the moment of a clipboard-window press, used to land the paste at the right spot."><span class="swatch swatch-circle" style="background:#c792ea"></span>cursor capture</span>
+        <span title="Paste event: text typed into the focused app. Bar spans the press window; hover the bar for the pasted preview."><span class="swatch swatch-rect" style="background:#d64545"></span>paste</span>
+        <span title="Debug flag: high-visibility bookmark stamped by double-tapping the debug-flag key (default 'e'). Use it to mark moments you want to revisit in post-session replay."><span class="swatch swatch-flag" style="color:#ff5252">🚩</span>debug flag</span>
+        <span class="muted" id="timeline-window-label" title="Visible time range of the timeline (drag the SVG to pan; use the zoom controls to change span)."></span>
       </div>
       <div class="timeline-controls">
         <label class="filter-label">stream:</label>
@@ -981,25 +981,45 @@ _INDEX_HTML = """<!doctype html>
   }
 
   function renderHeader(s) {
-    let meta = `${s.session_id} · ${s.model} (${s.device}) · ${s.chunk_count} chunk(s)`;
+    const parts = [];
+    parts.push(
+      `<span title="Session id">${escape(s.session_id)}</span>` +
+      ` · <span title="Fast-stream model running on this device">` +
+      `${escape(s.model)} (${escape(s.device)})</span>` +
+      ` · <span title="Number of transcript chunks finalized this session">` +
+      `${s.chunk_count} chunk(s)</span>`
+    );
     if (s.hq) {
       const now = s.now_seconds || 0;
       const edge = s.hq.leading_edge_seconds || 0;
       const lag = Math.max(0, now - edge);
-      meta += ` · HQ:${s.hq.model.replace(/^faster-whisper:/, '')} (lag ${lag.toFixed(1)}s)`;
+      const model = s.hq.model.replace(/^faster-whisper:/, '');
+      parts.push(
+        `<span title="High-quality stream model and how far behind realtime its leading edge is (smaller = healthier; spikes during cold-start or under load)">` +
+        `HQ:${escape(model)} (lag ${lag.toFixed(1)}s)</span>`
+      );
     }
     // Per-stream drop counters. Only render when something has actually
-    // been dropped so the header stays clean in healthy sessions.
+    // been dropped so the header stays clean in healthy sessions. Each
+    // counter gets a tooltip so the q/s suffix is self-explanatory.
     if (s.stream_stats) {
       for (const label of Object.keys(s.stream_stats)) {
         const st = s.stream_stats[label];
-        const totalDrops = (st.dropped_queue_full || 0) + (st.dropped_silent || 0);
-        if (totalDrops > 0) {
-          meta += ` · ⚠ ${label} dropped ${st.dropped_queue_full || 0}q+${st.dropped_silent || 0}s`;
+        const q = st.dropped_queue_full || 0;
+        const sil = st.dropped_silent || 0;
+        if (q + sil > 0) {
+          const tip = (
+            `Audio windows dropped on the ${label} stream. ` +
+            `q = ${q}: dropped because the transcriber input queue was full (transcriber falling behind realtime). ` +
+            `s = ${sil}: dropped by the VAD silent-gate (voiced_ms / voiced_frac below threshold — not enough speech to bother transcribing).`
+          );
+          parts.push(
+            `<span title="${escape(tip)}">⚠ ${escape(label)} dropped ${q}q+${sil}s</span>`
+          );
         }
       }
     }
-    $('meta').textContent = meta;
+    $('meta').innerHTML = parts.join(' · ');
     const cap = $('capture');
     cap.textContent = s.capture.mode;
     cap.className = 'pill ' + (s.capture.mode === 'r+aside' ? 'r-aside' : s.capture.mode);
