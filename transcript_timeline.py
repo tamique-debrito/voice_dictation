@@ -544,11 +544,42 @@ class TranscriptTimeline:
     # ------------------------------------------------------------------
 
     def _eligible_markers_locked(self) -> list[Marker]:
+        """Markers whose audio_time is at-or-before the fast watermark — i.e.
+        markers that can be placed at a real offset in the canonical render.
+        """
         wm = self._fast_high_watermark_locked()
         return sorted(
             [m for m in self._markers if m.audio_time <= wm],
             key=lambda m: (m.audio_time, m.seq),
         )
+
+    def _pending_markers_locked(self) -> list[Marker]:
+        """Markers whose audio_time hasn't been reached by transcription yet.
+
+        These can't be placed at a meaningful offset in the canonical render
+        (the audio they anchor to hasn't been turned into words), but they
+        SHOULD still be visible to the user immediately — otherwise pressing
+        ``r`` and then waiting for the next segment looks like nothing
+        happened. ``tail``/``full_text``/``*_annotated`` surface these at
+        the trailing edge of the rendered output. Once subsequent segments
+        cross their audio_time, they move from this list to the eligible
+        list and get placed at the correct word-level offset.
+        """
+        wm = self._fast_high_watermark_locked()
+        return sorted(
+            [m for m in self._markers if m.audio_time > wm],
+            key=lambda m: (m.audio_time, m.seq),
+        )
+
+    @staticmethod
+    def _pending_marker_tokens(pending: list[Marker]) -> str:
+        if not pending:
+            return ""
+        parts = []
+        for m in pending:
+            token = marker_start(m.type_name) if m.kind == "start" else marker_end(m.type_name)
+            parts.append(token)
+        return " ".join(parts)
 
     def _inject_markers(
         self,
@@ -597,29 +628,32 @@ class TranscriptTimeline:
             return len(self._render_text)
 
     def tail(self, n: int) -> str:
-        """Return the last ~n characters of the canonical render WITH markers
-        injected at their proper positions."""
+        """Return the last ~n characters of the canonical render with
+        markers injected at their proper positions, plus any pending markers
+        (audio_time still ahead of fast watermark) appended at the end so
+        they appear in the widget immediately on press."""
         if n <= 0:
             return ""
         with self._lock:
             self._ensure_render()
             clean = self._render_text
             clean_off = self._render_offsets
-            # Determine the clean-text tail (n chars).
             lo_clean = max(0, len(clean) - n)
             tail_clean = clean[lo_clean:]
-            # Adjust offsets to be local to tail_clean.
             tail_offsets = [
                 (off - lo_clean, ws, we) for (off, ws, we) in clean_off
                 if off >= lo_clean
             ]
-            # Determine the audio_time range covered by the tail.
             if tail_offsets:
                 t_lo = tail_offsets[0][1]
             else:
                 t_lo = float("-inf")
             markers = self._eligible_markers_locked()
-            return self._inject_markers(tail_clean, tail_offsets, markers, clip_lo=t_lo)
+            placed = self._inject_markers(tail_clean, tail_offsets, markers, clip_lo=t_lo)
+            pending = self._pending_marker_tokens(self._pending_markers_locked())
+        if pending:
+            return (placed + " " + pending).strip() if placed else pending
+        return placed
 
     def tail_annotated(self, n: int) -> list[dict]:
         """Return source-tagged spans for the last ~n characters, with
@@ -644,8 +678,11 @@ class TranscriptTimeline:
             else:
                 kept.insert(0, (span, m, text[-remaining:]))
                 break
+        pending = self._pending_marker_tokens(self._pending_markers_locked())
         if not kept:
-            return [{"source": "fast", "text": ""}]
+            # No words yet but maybe pending markers from a just-pressed
+            # recording — show them so the widget reflects the press.
+            return [{"source": "fast", "text": pending or ""}]
         out: list[dict] = []
         for span, m, kept_text in kept:
             out.append({
@@ -654,6 +691,11 @@ class TranscriptTimeline:
                     kept_text, m, markers, full_span_text=span.get("text", "")
                 ),
             })
+        if pending:
+            # Append pending markers to the last (most-recent) span so they
+            # show up at the right edge of the rendered tail. They'll be
+            # absorbed into a placed position on the next ingest_segment.
+            out[-1]["text"] = (out[-1]["text"] + " " + pending).strip()
         return out
 
     @staticmethod
@@ -707,7 +749,11 @@ class TranscriptTimeline:
         with self._lock:
             self._ensure_render()
             markers = self._eligible_markers_locked()
-            return self._inject_markers(self._render_text, self._render_offsets, markers)
+            placed = self._inject_markers(self._render_text, self._render_offsets, markers)
+            pending = self._pending_marker_tokens(self._pending_markers_locked())
+        if pending:
+            return (placed + " " + pending).strip() if placed else pending
+        return placed
 
     def full_clean_text(self) -> str:
         """Render without marker tokens. Used for chunk-flush bookkeeping."""
@@ -722,6 +768,7 @@ class TranscriptTimeline:
             spans = list(self._render_spans)
             meta = list(self._render_span_meta)
             markers = self._eligible_markers_locked()
+            pending = self._pending_marker_tokens(self._pending_markers_locked())
         out: list[dict] = []
         for span, m in zip(spans, meta):
             text = span.get("text", "")
@@ -729,6 +776,11 @@ class TranscriptTimeline:
                 "source": span.get("source"),
                 "text": self._inject_markers_into_span(text, m, markers, full_span_text=text),
             })
+        if pending:
+            if out:
+                out[-1]["text"] = (out[-1]["text"] + " " + pending).strip()
+            else:
+                out.append({"source": "fast", "text": pending})
         return out
 
     def find_offset_for_time(self, t: float, mode: str = "before") -> int:
@@ -847,6 +899,11 @@ class TranscriptTimeline:
     def force_flush(self) -> dict:
         paths: dict[str, Optional[str]] = {}
         with self._lock:
+            # At shutdown no more segments arrive, so any markers anchored
+            # past the current fast watermark would never become eligible
+            # and would be dropped from the canonical chunk + final
+            # transcript. Re-anchor them to the watermark so they survive.
+            self.flush_pending_markers()
             self._ensure_render()
             full = self._render_text
             pending = full[self._canonical_emitted_chars:]

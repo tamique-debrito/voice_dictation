@@ -272,8 +272,12 @@ class PersistentApp:
             cursor_time_at=self._cursor_time_at,
         )
 
-        # Bare double-tap dispatcher
-        keys = set(self._marker_keys) | self.clipboard_mgr.keys() | {"x", "q", "m"}
+        # Bare double-tap dispatcher. `e` is the "error" / debug-flag key:
+        # pressing it stamps a high-visibility event into the debug log
+        # (and the persisted debug_events.jsonl) so post-session replay
+        # can jump straight to "the moment something went wrong" instead
+        # of grepping through the full timeline.
+        keys = set(self._marker_keys) | self.clipboard_mgr.keys() | {"x", "q", "m", "e"}
         self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
 
     def _request_force_flush_all(self) -> None:
@@ -590,6 +594,9 @@ class PersistentApp:
         elif char == "m":
             self._ack("mute toggle (m)")
             self._toggle_mute()
+        elif char == "e":
+            self._ack("error flag (e)")
+            self._flag_issue()
         elif char == "q":
             self._ack("quit (q)")
             self._stop.set()
@@ -631,6 +638,50 @@ class PersistentApp:
                 args=(result.closed_window,),
                 daemon=True,
             ).start()
+
+    def _flag_issue(self) -> None:
+        """Stamp a high-visibility ``debug_flag`` event with the current
+        session time. Captured by the debug ring buffer (so the widget
+        timeline renders it immediately) and by ``debug_events.jsonl``
+        (so post-session replay can jump straight to it).
+
+        Useful workflow: when something feels off during a session — a
+        missed word, a botched paste, an HQ stream lag spike — double-tap
+        ``b`` to bookmark the exact moment. Then post-session you can
+        replay or grep the JSONL for ``"kind": "debug_flag"`` to land at
+        the right spot without combing through the whole timeline.
+        """
+        # Snapshot useful context so the flag is self-describing in JSONL.
+        try:
+            counters = {
+                s.label: {
+                    "accepted": s.windows_accepted_count,
+                    "dropped_queue_full": s.dropped_queue_full_count,
+                    "dropped_silent": s.dropped_silent_count,
+                }
+                for s in self.streams
+            }
+        except Exception:
+            counters = {}
+        try:
+            hq_edge = self.timeline.hq_high_watermark()
+            fast_edge = self.timeline.fast_high_watermark()
+        except Exception:
+            hq_edge = 0.0
+            fast_edge = 0.0
+        self._debug.log("debug_flag", {
+            "wall_clock": datetime.now().strftime("%H:%M:%S"),
+            "fast_watermark": round(fast_edge, 3),
+            "hq_watermark": round(hq_edge, 3),
+            "stream_stats": counters,
+            "capture_mode": (
+                "r" if self.clipboard_mgr.is_active("r") else
+                "aside" if self.clipboard_mgr.is_active("a") else
+                "passive"
+            ),
+        })
+        self._done("flagged this moment for debug — see debug_events.jsonl",
+                   style="bold magenta")
 
     def _toggle_mute(self) -> None:
         now_muted = self.audio_fanout.toggle_muted()
@@ -923,6 +974,7 @@ class PersistentApp:
             "  [bold]r (x2)[/bold] - clipboard window: paste captured text on second tap\n"
             "  [bold]a (x2)[/bold] - aside clipboard window\n"
             "  [bold]x (x2)[/bold] - cancel current window (aside if active, else r)\n"
+            "  [bold]e (x2)[/bold] - flag an error in this moment (visible in widget + jsonl)\n"
             "  [bold]q (x2)[/bold] - quit + flush\n\n"
             f"[dim]Session: {self.timeline.session_id}[/dim]\n"
             f"[dim]Streams: {self._format_stream_summary()}[/dim]\n"

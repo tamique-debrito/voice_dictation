@@ -307,6 +307,17 @@ _INDEX_HTML = """<!doctype html>
     z-index: 1;
   }
   .debug-controls label { color: var(--muted); font-size: 12px; }
+  .timeline-controls {
+    padding: 6px 12px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    border-bottom: 1px solid #1b1d23;
+    background: var(--panel-2);
+    font-size: 11px;
+  }
+  .timeline-controls .filter-label { color: var(--muted); }
   .chip {
     display: inline-block;
     padding: 2px 8px;
@@ -319,6 +330,18 @@ _INDEX_HTML = """<!doctype html>
     border: 1px solid transparent;
   }
   .chip.on { background: var(--accent); color: #fff; border-color: #b39ddb; }
+  /* Stream chip colors are chosen NOT to overlap with any audio_window
+     reason color (forced=orange, silence=blue, max=pink, drops=red/grey)
+     or the press/marker color. Stream identity is conveyed by row
+     position + shape, not by per-bar color. */
+  .chip.stream-fast.on { background: #607d8b; color: #fff; border-color: #607d8b; }
+  .chip.stream-hq.on   { background: #26a69a; color: #fff; border-color: #26a69a; }
+  .chip-sep { display: inline-block; width: 1px; height: 14px; background: #3a3d45;
+              vertical-align: middle; margin: 0 4px; }
+  .filter-label { color: var(--muted); font-size: 11px; margin-right: 2px; }
+  .legend-swatch { display: inline-block; width: 12px; height: 10px; vertical-align: middle;
+                   margin-right: 2px; border-radius: 2px; }
+  .legend-lbl { color: var(--muted); font-size: 10px; margin-right: 6px; }
   table.events {
     width: 100%; border-collapse: collapse;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -340,11 +363,85 @@ _INDEX_HTML = """<!doctype html>
   table.events tr.kind-marker td.kind    { color: var(--marker); }
   table.events tr.kind-cursor_capture td.kind { color: #c792ea; }
   table.events tr.kind-mute td.kind      { color: #e7c84a; }
+  table.events tr.kind-debug_flag td.kind { color: #ff5252; font-weight: 800; }
+  table.events tr.kind-debug_flag { background: rgba(255, 82, 82, 0.08); }
 
+  /* Timeline body lays out a collapsible label gutter to the LEFT and
+     the SVG to the right. The gutter labels each y-band with plain text;
+     stream identity in the bars themselves is conveyed by row position
+     plus the HQ-only teal-dotted-top shape signature — no per-stream
+     coloring in the gutter, because the audio_window band's bars can
+     take many different colors based on reason. */
+  .timeline-row {
+    display: flex;
+    align-items: stretch;
+    background: var(--panel-2);
+  }
+  #timeline-labels {
+    flex: 0 0 120px;
+    background: var(--panel);
+    border-right: 1px solid #1b1d23;
+    position: relative;
+    height: 220px;
+    font-size: 10px;
+    color: var(--muted);
+    transition: flex-basis 0.15s ease;
+  }
+  #timeline-labels.collapsed { flex-basis: 18px; }
+  #timeline-labels.collapsed .row-label { display: none; }
+  .row-label {
+    position: absolute;
+    left: 6px;
+    right: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap;
+    /* line-height: 1 + explicit font-size so the label's text center
+       sits exactly font-size/2 below its `top`. Each label's `top:` is
+       then computed as (bar_center − font_size/2) so the text center
+       lines up with the bar center in the SVG to the right. Default
+       line-height (~1.2) would drift labels down ~1px per row,
+       accumulating into a visible misalignment by the time you reach
+       the segment / paste bands. */
+    line-height: 1;
+    font-size: 9px;
+  }
+  .row-label.group {
+    font-weight: 700;
+    color: #b6bac1;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 7px;
+  }
+  .row-label.sub {
+    padding-left: 12px;
+  }
+  .press-tri-down {
+    display: inline-block; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid #6abf4b; vertical-align: middle; margin-right: 2px;
+  }
+  .press-tri-down.end { border-top-color: #d64545; }
+  #timeline-labels-toggle {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 14px;
+    height: 14px;
+    background: #3a3d45;
+    color: var(--muted);
+    border-radius: 3px;
+    text-align: center;
+    line-height: 14px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 10px;
+  }
+  #timeline-labels-toggle:hover { background: #4a4d55; }
   #timeline-svg {
-    width: 100%;
+    flex: 1 1 auto;
     background: var(--panel-2);
     display: block;
+    height: 220px;
   }
   #timeline-legend {
     padding: 6px 12px;
@@ -358,6 +455,23 @@ _INDEX_HTML = """<!doctype html>
   #timeline-legend .swatch {
     display: inline-block; width: 10px; height: 10px;
     border-radius: 2px; margin-right: 4px; vertical-align: middle;
+  }
+  /* Swatch variants — shapes that mirror what the SVG actually draws,
+     so legend ≈ what you see in the timeline. */
+  #timeline-legend .swatch-rect   { width: 14px; height: 6px; border-radius: 1px; }
+  #timeline-legend .swatch-stick  { width: 1px; height: 10px; }
+  #timeline-legend .swatch-circle { width: 8px; height: 8px; border-radius: 50%; }
+  #timeline-legend .swatch-tri {
+    width: 0; height: 0; background: none;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid transparent;
+    border-radius: 0;
+  }
+  #timeline-legend .swatch-tri.tri-green { border-top-color: #6abf4b; }
+  #timeline-legend .swatch-tri.tri-red   { border-top-color: #d64545; }
+  #timeline-legend .swatch-flag {
+    width: auto; height: auto; background: none !important; border-radius: 0;
+    font-size: 12px; line-height: 1;
   }
 </style>
 </head>
@@ -397,6 +511,7 @@ _INDEX_HTML = """<!doctype html>
         <span class="chip on" data-kind="cursor_capture">cursor_capture</span>
         <span class="chip on" data-kind="paste">paste</span>
         <span class="chip on" data-kind="mute">mute</span>
+        <span class="chip on" data-kind="debug_flag">🚩 debug_flag</span>
       </div>
       <div id="events-table" class="copyable" title="click to copy all visible events"><div class="empty">no events yet</div></div>
     </div>
@@ -405,14 +520,55 @@ _INDEX_HTML = """<!doctype html>
     <h2><span class="chev">▸</span>Debug timeline</h2>
     <div class="body" id="timeline-body">
       <div id="timeline-legend">
-        <span><span class="swatch" style="background:#5fa8d3"></span>audio window</span>
-        <span><span class="swatch" style="background:#6abf4b"></span>segment</span>
-        <span><span class="swatch" style="background:#7e57c2"></span>word</span>
-        <span><span class="swatch" style="background:#f0a04b"></span>press / marker</span>
-        <span><span class="swatch" style="background:#d64545"></span>paste</span>
+        <span><span class="swatch swatch-rect" style="background:#6abf4b"></span>segment bar</span>
+        <span><span class="swatch swatch-stick" style="background:#7e57c2"></span>word tick</span>
+        <span><span class="swatch swatch-tri tri-green"></span><span class="swatch swatch-tri tri-red"></span>press (start / end)</span>
+        <span><span class="swatch swatch-circle" style="background:#f0a04b"></span>marker</span>
+        <span><span class="swatch swatch-circle" style="background:#c792ea"></span>cursor capture</span>
+        <span><span class="swatch swatch-rect" style="background:#d64545"></span>paste</span>
+        <span><span class="swatch swatch-flag" style="color:#ff5252">🚩</span>debug flag</span>
         <span class="muted" id="timeline-window-label"></span>
       </div>
-      <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      <div class="timeline-controls">
+        <label class="filter-label">stream:</label>
+        <span class="chip on stream-fast" data-stream="fast">fast</span>
+        <span class="chip on stream-hq" data-stream="hq">hq</span>
+        <span class="chip-sep"></span>
+        <label class="filter-label">audio_window:</label>
+        <span class="legend-swatch" style="background:#5fa8d3" title="VAD found a silence boundary → window cut and accepted"></span><span class="legend-lbl" title="VAD found a silence boundary → window cut and accepted">silence-cut</span>
+        <span class="legend-swatch" style="background:#ec407a" title="Hit the max_window_seconds cap (no silence found in time) → window force-cut"></span><span class="legend-lbl" title="Hit the max_window_seconds cap (no silence found in time) → window force-cut">max_window</span>
+        <span class="legend-swatch" style="background:#ffa726" title="Aggregator flushed early because a clipboard-window end-press requested an immediate flush"></span><span class="legend-lbl" title="Aggregator flushed early because a clipboard-window end-press requested an immediate flush">forced (end-press flush)</span>
+        <span class="legend-swatch" style="background:#3a3d45;border-top:2px solid #ff5252" title="Window dropped because voiced_ms or voiced_frac fell below the VAD gating thresholds — not enough speech to bother transcribing"></span><span class="legend-lbl" title="Window dropped because voiced_ms or voiced_frac fell below the VAD gating thresholds">⚠S dropped (silent gate)</span>
+        <span class="legend-swatch" style="background:#d64545;border-top:2px solid #ff5252" title="Window dropped because the transcriber's input queue was full — the transcriber is falling behind realtime (typically HQ during cold-start or backlog)"></span><span class="legend-lbl" title="Window dropped because the transcriber's input queue was full">⛔Q dropped (queue full)</span>
+      </div>
+      <div class="timeline-row">
+        <div id="timeline-labels">
+          <span id="timeline-labels-toggle" title="hide/show labels">‹</span>
+          <!-- Each label's `top` = (bar-center y) - (font_size/2).
+               With line-height:1 and explicit font sizes that gives
+               text-center == bar-center.
+               Bar geometry in the SVG (height: 220px, viewBox y match):
+                 win  fast 20-28  (center 24) → font 9 → top 20
+                 win  hq   30-38  (center 34) → top 30
+                 seg  fast 46-54  (center 50) → top 46
+                 seg  hq   66-74  (center 70) → top 66
+                 paste    95-115  (center 105) → top 101
+                 marker   y=140 circle r=4    → top 136
+                 cursor   y=166 circle r=3    → top 162
+               Group headers (font 7) live in the gaps between bands. -->
+          <span class="row-label" style="top: 4px"><span class="press-tri-down"></span><span class="press-tri-down end"></span> Press</span>
+          <span class="row-label group" style="top: 12px">Windows</span>
+          <span class="row-label sub"   style="top: 20px">Fast</span>
+          <span class="row-label sub"   style="top: 30px">HQ</span>
+          <span class="row-label group" style="top: 39px">Segments</span>
+          <span class="row-label sub"   style="top: 46px">Fast</span>
+          <span class="row-label sub"   style="top: 66px">HQ</span>
+          <span class="row-label"       style="top: 101px">Paste</span>
+          <span class="row-label"       style="top: 136px">Marker</span>
+          <span class="row-label"       style="top: 162px">Cursor capture</span>
+        </div>
+        <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      </div>
     </div>
   </section>
 </main>
@@ -848,8 +1004,13 @@ _INDEX_HTML = """<!doctype html>
   }
 
   // ---- Debug events ---------------------------------------------------
-  const EVENT_KINDS = ['audio_window','segment','press','marker','cursor_capture','paste','mute'];
+  const EVENT_KINDS = ['audio_window','segment','press','marker','cursor_capture','paste','mute','debug_flag'];
   const enabledKinds = new Set(EVENT_KINDS);
+  // Stream filter — events tagged with data.stream get filtered by this.
+  // Events without a stream tag (press, marker, paste, debug_flag) are
+  // unaffected by stream filtering and always render when their kind is on.
+  const STREAMS = ['fast','hq'];
+  const enabledStreams = new Set(STREAMS);
   document.querySelectorAll('.chip[data-kind]').forEach(c => {
     c.addEventListener('click', () => {
       const k = c.dataset.kind;
@@ -857,6 +1018,27 @@ _INDEX_HTML = """<!doctype html>
       else { enabledKinds.add(k); c.classList.add('on'); }
     });
   });
+  document.querySelectorAll('.chip[data-stream]').forEach(c => {
+    c.addEventListener('click', () => {
+      const s = c.dataset.stream;
+      if (enabledStreams.has(s)) { enabledStreams.delete(s); c.classList.remove('on'); }
+      else { enabledStreams.add(s); c.classList.add('on'); }
+    });
+  });
+  // Timeline label gutter collapse/expand.
+  const _labelsToggle = document.getElementById('timeline-labels-toggle');
+  if (_labelsToggle) {
+    _labelsToggle.addEventListener('click', () => {
+      const gutter = document.getElementById('timeline-labels');
+      const collapsed = gutter.classList.toggle('collapsed');
+      _labelsToggle.textContent = collapsed ? '›' : '‹';
+    });
+  }
+  function passesStreamFilter(e) {
+    const st = e.data && e.data.stream;
+    if (!st) return true;
+    return enabledStreams.has(st);
+  }
 
   function summarize(evt) {
     const d = evt.data || {};
@@ -894,7 +1076,9 @@ _INDEX_HTML = """<!doctype html>
       lastEventsRendered = [];
       return;
     }
-    const filtered = events.filter(e => enabledKinds.has(e.kind)).slice(-300);
+    const filtered = events
+      .filter(e => enabledKinds.has(e.kind) && passesStreamFilter(e))
+      .slice(-300);
     lastEventsRendered = filtered;
     const rows = filtered.map(e => (
       `<tr class="kind-${e.kind}">` +
@@ -950,10 +1134,28 @@ _INDEX_HTML = """<!doctype html>
       parts.push(`<text x="${xx+2}" y="${H-4}" fill="#8a8d97" font-size="10">${t.toFixed(0)}s</text>`);
     }
 
+    // Sub-row y-coordinates per stream for stream-tagged events.
+    // Layout: audio fast/hq stacked, then segment fast (bar + words below),
+    // then segment hq (bar + words below), then paste/marker/cursor unchanged.
+    const ROWS = {
+      audio_window: { fast: 20, hq: 30, h: 8 },
+      segment:      { fast: 46, hq: 66, h: 8 },
+      word:         { fast: 55, hq: 75, h: 5 },
+    };
+    // Lane separators only — band labels live in the HTML side panel to
+    // the left, so they don't visually compete with the bars themselves.
+    parts.push(`<line x1="0" y1="42" x2="${W}" y2="42" stroke="#1b1d23" stroke-width="0.5"/>`);
+    parts.push(`<line x1="0" y1="62" x2="${W}" y2="62" stroke="#1b1d23" stroke-width="0.5" stroke-dasharray="2,3"/>`);
+
     for (const e of events) {
       const d = e.data || {};
+      const stream = d.stream === 'hq' ? 'hq' : 'fast';
+      // Apply stream filter for stream-tagged events.
+      if (d.stream && !enabledStreams.has(stream)) continue;
       if (e.kind === 'audio_window' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
+        const yRow = ROWS.audio_window[stream];
+        const hRow = ROWS.audio_window.h;
         const isDrop = d.reason && d.reason.startsWith('dropped');
         const fill = d.reason === 'forced' ? '#ffa726'
                    : d.reason === 'silence' ? '#5fa8d3'
@@ -961,31 +1163,55 @@ _INDEX_HTML = """<!doctype html>
                    : d.reason === 'dropped_silent' ? '#3a3d45'
                    : d.reason === 'dropped_queue_full' ? '#d64545'
                    : '#5fa8d3';
-        const opacity = isDrop ? 0.5 : 0.85;
-        const stroke = isDrop ? ' stroke="#ff5252" stroke-width="1.5" stroke-dasharray="3,2"' : '';
+        const opacity = isDrop ? 0.6 : 0.85;
         const title = escape(summarize(e));
-        parts.push(`<rect x="${x0}" y="20" width="${x1-x0}" height="20" fill="${fill}" opacity="${opacity}"${stroke}><title>${title}</title></rect>`);
+        // Dropped windows: solid bar with a thick red top stroke (visible
+        // even at 1-pixel bar width) and a contrast-on-dark glyph anchored
+        // ABOVE the bar so very narrow bars don't get visually swallowed
+        // by their own marker. Avoid diagonal cross-strokes — they look
+        // like a filled box at small widths.
+        parts.push(`<rect x="${x0}" y="${yRow}" width="${x1-x0}" height="${hRow}" fill="${fill}" opacity="${opacity}"><title>${title}</title></rect>`);
+        if (stream === 'hq' && !isDrop) {
+          // Teal dotted top stripe distinguishes HQ bars from fast bars
+          // without changing the reason color. Skipped on drops because
+          // the red top stroke is already a stronger differentiator.
+          parts.push(`<line x1="${x0}" y1="${yRow+0.5}" x2="${x1}" y2="${yRow+0.5}" stroke="#26a69a" stroke-width="1" stroke-dasharray="2,2"/>`);
+        }
         if (isDrop) {
-          // Diagonal X across the bar so a dropped window is unmistakable
-          // even at a glance, plus a small ⚠ glyph just above it tagged
-          // with the drop reason.
-          parts.push(`<line x1="${x0}" y1="20" x2="${x1}" y2="40" stroke="#ff5252" stroke-width="1.5"><title>${title}</title></line>`);
-          parts.push(`<line x1="${x0}" y1="40" x2="${x1}" y2="20" stroke="#ff5252" stroke-width="1.5"><title>${title}</title></line>`);
-          const sym = d.reason === 'dropped_queue_full' ? '⚠Q' : '⚠S';
-          parts.push(`<text x="${x0+2}" y="18" fill="#ff5252" font-size="9" font-weight="bold">${sym}</text>`);
+          parts.push(`<line x1="${x0}" y1="${yRow-0.5}" x2="${x1}" y2="${yRow-0.5}" stroke="#ff5252" stroke-width="2"><title>${title}</title></line>`);
+          const sym = d.reason === 'dropped_queue_full' ? '⛔Q' : '⚠S';
+          // Place the glyph slightly ABOVE the bar and ALWAYS at the bar's
+          // x-start, regardless of bar width, so even a 2-pixel bar is
+          // unambiguously labeled.
+          parts.push(`<text x="${x0}" y="${yRow-2}" fill="#ff5252" font-size="10" font-weight="bold"><title>${title}</title>${sym}</text>`);
         }
       } else if (e.kind === 'segment' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
-        parts.push(`<rect x="${x0}" y="50" width="${x1-x0}" height="20" fill="#6abf4b" opacity="0.7"><title>${escape(summarize(e))}</title></rect>`);
+        const yRow = ROWS.segment[stream];
+        const hRow = ROWS.segment.h;
+        // Same green for both streams — stream identity is conveyed by
+        // row position. HQ rect gets a thin dotted top border so the
+        // bar shape itself is also distinct, not just its location.
+        parts.push(`<rect x="${x0}" y="${yRow}" width="${x1-x0}" height="${hRow}" fill="#6abf4b" opacity="0.7"><title>${escape(summarize(e))}</title></rect>`);
+        if (stream === 'hq') {
+          parts.push(`<line x1="${x0}" y1="${yRow+0.5}" x2="${x1}" y2="${yRow+0.5}" stroke="#26a69a" stroke-width="1" stroke-dasharray="2,2"/>`);
+        }
+        const wordY = ROWS.word[stream];
         for (const w of (d.words||[])) {
           const wx = x(w.s);
-          parts.push(`<line x1="${wx}" y1="75" x2="${wx}" y2="83" stroke="#7e57c2" stroke-width="1"><title>${escape(w.text)} [${w.s.toFixed(2)}–${w.e.toFixed(2)}] p=${w.p}</title></line>`);
+          parts.push(`<line x1="${wx}" y1="${wordY}" x2="${wx}" y2="${wordY+ROWS.word.h}" stroke="#7e57c2" stroke-width="1"><title>${escape(w.text)} [${w.s.toFixed(2)}–${w.e.toFixed(2)}] p=${w.p}</title></line>`);
         }
       } else if (e.kind === 'press') {
         const xx = x(d.session_time);
         const stroke = d.phase === 'start' ? '#6abf4b' : d.phase === 'end' ? '#d64545' : '#f0a04b';
-        parts.push(`<line x1="${xx}" y1="0" x2="${xx}" y2="${H-15}" stroke="${stroke}" stroke-width="2" opacity="0.8"><title>${escape(summarize(e))}</title></line>`);
-        parts.push(`<text x="${xx+2}" y="12" fill="${stroke}" font-size="10">${d.key}/${d.phase}</text>`);
+        const ttl = escape(summarize(e));
+        // Distinct shape signature: a downward triangle ▼ anchored at the
+        // very top, plus a dashed line spanning the timeline. The
+        // triangle is the unambiguous "press" icon — it can't be confused
+        // with a forced/silence/max audio_window bar.
+        parts.push(`<polygon points="${xx-4},2 ${xx+4},2 ${xx},10" fill="${stroke}"><title>${ttl}</title></polygon>`);
+        parts.push(`<line x1="${xx}" y1="10" x2="${xx}" y2="${H-15}" stroke="${stroke}" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.7"><title>${ttl}</title></line>`);
+        parts.push(`<text x="${xx+6}" y="18" fill="${stroke}" font-size="10">${d.key}/${d.phase}</text>`);
       } else if (e.kind === 'paste') {
         const x0 = x(d.start_press_time), x1 = Math.max(x(d.end_press_time), x0+1);
         parts.push(`<rect x="${x0}" y="95" width="${x1-x0}" height="20" fill="#d64545" opacity="${d.timed_out?0.4:0.7}" stroke="#fff" stroke-width="0.5"><title>${escape(summarize(e))}</title></rect>`);
@@ -996,6 +1222,14 @@ _INDEX_HTML = """<!doctype html>
       } else if (e.kind === 'cursor_capture') {
         const xx = x(d.press_time);
         parts.push(`<circle cx="${xx}" cy="166" r="3" fill="#c792ea"><title>${escape(summarize(e))}</title></circle>`);
+      } else if (e.kind === 'debug_flag') {
+        // Tall red line spanning the full timeline height + a 🚩 glyph
+        // anchored at the top so flagged moments are unmistakable at any
+        // zoom level.
+        const xx = x(e.ts);
+        const title = escape(summarize(e));
+        parts.push(`<line x1="${xx}" y1="0" x2="${xx}" y2="${H}" stroke="#ff5252" stroke-width="2"><title>${title}</title></line>`);
+        parts.push(`<text x="${xx-6}" y="11" font-size="13"><title>${title}</title>🚩</text>`);
       }
     }
     svg.innerHTML = parts.join('');
