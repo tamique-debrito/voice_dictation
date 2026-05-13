@@ -1,0 +1,82 @@
+{
+  "_comment": "Copy to local_config.json to override defaults. Unknown keys are ignored. This file is the single source of truth — no env vars are read (except HF_HUB_OFFLINE is set FROM this file's hf_hub_offline field for libraries that require it).",
+
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "format": "int16",
+    "chunk_size": 1024
+  },
+
+  "vad": {
+    "silence_ms": 500,
+    "aggressiveness": 2,
+    "min_voiced_ms": 750,
+    "min_voiced_frac": 0.35
+  },
+
+  "paste": {
+    "delay": 0.1,
+    "drain_timeout": 6.0
+  },
+
+  "persistent": {
+    "chunk_token_target": 2000,
+    "transcripts_dir": "",
+    "audio_save_dir": "",
+    "transcript_stream_port": 8766,
+    "widget_port": 0,
+    "hf_hub_offline": true,
+
+    "fast": {
+      "enabled": true,
+      "max_window_seconds": 25.0,
+      "fw": {
+        "model": "small.en",
+        "compute": "int8",
+        "device": "",
+        "beam_size": 1,
+        "condition_on_previous_text": false,
+        "no_speech_threshold": 0.9,
+        "log_prob_threshold": -0.5
+      }
+    },
+
+    "hq": {
+      "enabled": false,
+      "max_window_seconds": 90.0,
+      "fw": {
+        "model": "medium.en",
+        "compute": "int8",
+        "device": "",
+        "beam_size": 5,
+        "condition_on_previous_text": true,
+        "no_speech_threshold": 0.9,
+        "log_prob_threshold": -0.5
+      }
+    }
+  },
+
+  "markers": [
+    {
+      "key": "1",
+      "type": "assistant_annotation",
+      "description": "What an assistant should do at this point, or in reaction to the most recent utterance."
+    },
+    {
+      "key": "2",
+      "type": "note",
+      "description": "A personal note for the user; not directed at any agent."
+    }
+  ],
+
+  "hotkeys": {
+    "no_modifiers": false,
+    "modifiers": ["ctrl", "cmd"],
+    "keys": {
+      "toggle_recording": "r",
+      "discard_recording": "x",
+      "toggle_aside": "a"
+    }
+  }
+}

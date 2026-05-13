@@ -36,6 +36,11 @@ _INDEX_HTML = """<!doctype html>
     --marker: #f0a04b;
     --good: #6abf4b;
     --bad: #d64545;
+    /* HQ transcript text: a brighter, slightly cooler tone than the
+       default fast-stream color so the eye can distinguish the
+       HQ-decoded prefix from the fast-only tail at a glance. */
+    --src-hq: #b3e5fc;
+    --src-fast: #cfcfd5;
   }
   body {
     margin: 0;
@@ -182,6 +187,110 @@ _INDEX_HTML = """<!doctype html>
   .marker-pill.recording { background: var(--r-active); color: #fff; }
   .marker-pill.aside     { background: var(--aside-active); color: #1b1d23; }
 
+  /* Settings: floating gear + modal */
+  #settings-gear {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid #3a3d45;
+    background: var(--panel);
+    color: var(--fg);
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    z-index: 100;
+    line-height: 1;
+  }
+  #settings-gear:hover { background: var(--panel-2); }
+  #settings-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200;
+  }
+  #settings-overlay[hidden] { display: none; }
+  #settings-modal {
+    background: var(--panel);
+    border: 1px solid #0d0e11;
+    border-radius: 8px;
+    width: min(640px, 92vw);
+    max-height: 86vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  #settings-modal header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px;
+    border-bottom: 1px solid #0d0e11;
+  }
+  #settings-modal h3 { margin: 0; font-size: 15px; }
+  #settings-close {
+    background: transparent; border: none; color: var(--muted);
+    font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px;
+  }
+  #settings-close:hover { color: var(--fg); }
+  #settings-modal .modal-body {
+    overflow-y: auto;
+    padding: 12px 16px;
+    flex: 1;
+  }
+  #settings-modal .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+  #settings-modal fieldset {
+    border: 1px solid #3a3d45; border-radius: 6px;
+    padding: 10px 12px 4px; margin-bottom: 12px;
+  }
+  #settings-modal legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
+  #settings-modal label {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px; font-size: 13px; gap: 12px;
+  }
+  #settings-modal label.checkbox { justify-content: flex-start; }
+  #settings-modal label.checkbox input { margin-right: 8px; }
+  #settings-modal input[type="number"],
+  #settings-modal select {
+    background: #15171c; color: var(--fg);
+    border: 1px solid #3a3d45; border-radius: 4px;
+    padding: 4px 8px; font-size: 13px; min-width: 140px;
+  }
+  #settings-modal .deferred-note { color: var(--muted); font-size: 11px; }
+  #settings-modal details { margin-top: 8px; }
+  #settings-modal details summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+  #settings-modal textarea {
+    width: 100%; height: 200px; margin-top: 8px;
+    background: #15171c; color: var(--fg);
+    border: 1px solid #3a3d45; border-radius: 4px;
+    padding: 8px; font-family: monospace; font-size: 12px;
+    box-sizing: border-box;
+  }
+  #settings-modal footer {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #0d0e11;
+  }
+  #settings-modal footer button {
+    padding: 6px 14px; border: none; border-radius: 4px;
+    background: #3a3d45; color: var(--fg); cursor: pointer;
+  }
+  #settings-modal footer button.primary { background: var(--accent); color: #fff; font-weight: 600; }
+  #settings-modal footer #settings-status { flex: 1; color: var(--muted); font-size: 12px; }
+
+  /* Merged transcript: HQ prefix in one color, fast tail in another. */
+  .src-hq   { color: var(--src-hq); }
+  .src-fast { color: var(--src-fast); }
+  .hq-edge {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 6px;
+    border-radius: 8px;
+    background: #324a5a;
+    color: #b3e5fc;
+    font-size: 11px;
+    vertical-align: middle;
+  }
+
   /* Debug panels */
   .debug-controls {
     padding: 8px 12px;
@@ -191,6 +300,11 @@ _INDEX_HTML = """<!doctype html>
     flex-wrap: wrap;
     align-items: center;
     border-bottom: 1px solid #1b1d23;
+    /* Anchor the filter chips to the top of the scrollable section body
+       so they remain visible when the events list grows long. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
   .debug-controls label { color: var(--muted); font-size: 12px; }
   .chip {
@@ -271,20 +385,6 @@ _INDEX_HTML = """<!doctype html>
       <div id="transcript" class="empty copyable" title="click to copy full transcript tail">no audio yet</div>
     </div>
   </section>
-  <section id="timeline-section" class="collapsible" data-state="collapsed">
-    <h2><span class="chev">▸</span>Debug timeline</h2>
-    <div class="body" id="timeline-body">
-      <div id="timeline-legend">
-        <span><span class="swatch" style="background:#5fa8d3"></span>audio window</span>
-        <span><span class="swatch" style="background:#6abf4b"></span>segment</span>
-        <span><span class="swatch" style="background:#7e57c2"></span>word</span>
-        <span><span class="swatch" style="background:#f0a04b"></span>press / marker</span>
-        <span><span class="swatch" style="background:#d64545"></span>paste</span>
-        <span class="muted" id="timeline-window-label"></span>
-      </div>
-      <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
-    </div>
-  </section>
   <section id="events-section" class="collapsible" data-state="collapsed">
     <h2><span class="chev">▸</span>Recent events</h2>
     <div class="body" id="events-body">
@@ -301,7 +401,251 @@ _INDEX_HTML = """<!doctype html>
       <div id="events-table" class="copyable" title="click to copy all visible events"><div class="empty">no events yet</div></div>
     </div>
   </section>
+  <section id="timeline-section" class="collapsible" data-state="expanded">
+    <h2><span class="chev">▸</span>Debug timeline</h2>
+    <div class="body" id="timeline-body">
+      <div id="timeline-legend">
+        <span><span class="swatch" style="background:#5fa8d3"></span>audio window</span>
+        <span><span class="swatch" style="background:#6abf4b"></span>segment</span>
+        <span><span class="swatch" style="background:#7e57c2"></span>word</span>
+        <span><span class="swatch" style="background:#f0a04b"></span>press / marker</span>
+        <span><span class="swatch" style="background:#d64545"></span>paste</span>
+        <span class="muted" id="timeline-window-label"></span>
+      </div>
+      <svg id="timeline-svg" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
 </main>
+
+<button id="settings-gear" title="Settings" aria-label="Open settings">⚙</button>
+
+<div id="settings-overlay" hidden>
+  <div id="settings-modal" role="dialog" aria-labelledby="settings-title">
+    <header>
+      <h3 id="settings-title">Settings</h3>
+      <button id="settings-close" aria-label="Close">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="hint">
+        Model / beam / prev-text changes hot-swap live (brief pause while the
+        new model loads). Other fields apply on next launch.
+      </p>
+
+      <fieldset>
+        <legend>General</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hf_hub_offline">
+          Skip HuggingFace update check at model load
+          <span class="deferred-note">(uncheck to allow downloads — slows startup; requires restart)</span>
+        </label>
+        <label>Chunk token target
+          <input type="number" min="100" max="20000" step="100" data-path="persistent.chunk_token_target">
+        </label>
+        <label>Paste delay (s)
+          <input type="number" step="0.05" min="0" max="2" data-path="paste.delay">
+        </label>
+        <label>Paste drain timeout (s)
+          <input type="number" step="0.5" min="1" max="60" data-path="paste.drain_timeout">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.debug_recording">
+          Record debug events + status snapshots for replay
+          <span class="deferred-note">(applies on next launch)</span>
+        </label>
+        <label>Snapshot interval (s)
+          <input type="number" step="0.5" min="0.5" max="60" data-path="persistent.debug_snapshot_interval_s">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Audio capture</legend>
+        <label>Sample rate (Hz)
+          <input type="number" min="8000" max="48000" step="1000" data-path="audio.sample_rate">
+        </label>
+        <label>Channels
+          <input type="number" min="1" max="2" data-path="audio.channels">
+        </label>
+        <label>Format
+          <select data-path="audio.format">
+            <option>int16</option><option>int32</option><option>float32</option>
+          </select>
+        </label>
+        <label>Chunk size (frames)
+          <input type="number" min="64" max="8192" step="64" data-path="audio.chunk_size">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>VAD &amp; gating</legend>
+        <label>Silence ms
+          <input type="number" min="100" max="5000" step="50" data-path="vad.silence_ms">
+        </label>
+        <label>Aggressiveness (0–3)
+          <input type="number" min="0" max="3" data-path="vad.aggressiveness">
+        </label>
+        <label>Min voiced ms
+          <input type="number" min="0" max="5000" step="50" data-path="vad.min_voiced_ms">
+        </label>
+        <label>Min voiced fraction (0–1)
+          <input type="number" min="0" max="1" step="0.05" data-path="vad.min_voiced_frac">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Fast stream</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.fast.enabled">
+          Enabled
+        </label>
+        <label>Model
+          <select data-path="persistent.fast.fw.model">
+            <option>tiny.en</option><option>base.en</option>
+            <option>small.en</option><option>medium.en</option>
+            <option>large-v3</option><option>distil-large-v3</option>
+          </select>
+        </label>
+        <label>Compute type
+          <select data-path="persistent.fast.fw.compute">
+            <option>int8</option><option>int8_float16</option>
+            <option>float16</option><option>float32</option>
+          </select>
+        </label>
+        <label>Device
+          <select data-path="persistent.fast.fw.device">
+            <option value="">auto-detect</option>
+            <option>cpu</option><option>cuda</option>
+          </select>
+        </label>
+        <label>Beam size
+          <input type="number" min="1" max="10" data-path="persistent.fast.fw.beam_size">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.fast.fw.condition_on_previous_text">
+          Condition on previous text
+        </label>
+        <label>No-speech threshold
+          <input type="number" min="0" max="1" step="0.05" data-path="persistent.fast.fw.no_speech_threshold">
+        </label>
+        <label>Log-prob threshold
+          <input type="number" step="0.1" data-path="persistent.fast.fw.log_prob_threshold">
+        </label>
+        <label>Max window seconds
+          <input type="number" step="0.1" min="5" max="120" data-path="persistent.fast.max_window_seconds">
+        </label>
+        <label>Window queue maxsize (drops on full)
+          <input type="number" min="1" max="512" data-path="persistent.fast.window_q_maxsize">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>HQ stream (background, higher quality)</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hq.enabled">
+          Enable HQ stream
+        </label>
+        <label>Model
+          <select data-path="persistent.hq.fw.model">
+            <option>tiny.en</option><option>base.en</option>
+            <option>small.en</option><option>medium.en</option>
+            <option>large-v3</option><option>distil-large-v3</option>
+          </select>
+        </label>
+        <label>Compute type
+          <select data-path="persistent.hq.fw.compute">
+            <option>int8</option><option>int8_float16</option>
+            <option>float16</option><option>float32</option>
+          </select>
+        </label>
+        <label>Device
+          <select data-path="persistent.hq.fw.device">
+            <option value="">auto-detect</option>
+            <option>cpu</option><option>cuda</option>
+          </select>
+        </label>
+        <label>Beam size
+          <input type="number" min="1" max="10" data-path="persistent.hq.fw.beam_size">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.hq.fw.condition_on_previous_text">
+          Condition on previous text
+        </label>
+        <label>No-speech threshold
+          <input type="number" min="0" max="1" step="0.05" data-path="persistent.hq.fw.no_speech_threshold">
+        </label>
+        <label>Log-prob threshold
+          <input type="number" step="0.1" data-path="persistent.hq.fw.log_prob_threshold">
+        </label>
+        <label>Max window seconds
+          <input type="number" step="0.1" min="5" max="240" data-path="persistent.hq.max_window_seconds">
+        </label>
+        <label>Window queue maxsize (drops on full)
+          <input type="number" min="1" max="512" data-path="persistent.hq.window_q_maxsize">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ports</legend>
+        <label>Widget port (0 = ephemeral)
+          <input type="number" min="0" max="65535" data-path="persistent.widget_port">
+        </label>
+        <label>Transcript stream port
+          <input type="number" min="0" max="65535" data-path="persistent.transcript_stream_port">
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Markers</legend>
+        <p class="hint" style="margin:0 0 8px">
+          Hotkey keys that toggle annotation markers in the transcript.
+        </p>
+        <table id="markers-table" style="width:100%;font-size:12px;border-collapse:collapse">
+          <thead>
+            <tr style="color:var(--muted);text-align:left">
+              <th style="width:50px">Key</th>
+              <th style="width:140px">Type</th>
+              <th>Description</th>
+              <th style="width:32px"></th>
+            </tr>
+          </thead>
+          <tbody id="markers-tbody"></tbody>
+        </table>
+        <button type="button" id="markers-add"
+                style="margin-top:6px;padding:4px 10px;background:#3a3d45;color:#fff;border:none;border-radius:4px;cursor:pointer">+ Add marker</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>Hotkeys</legend>
+        <label class="checkbox">
+          <input type="checkbox" data-path="hotkeys.no_modifiers">
+          Bare double-tap (no modifier keys held)
+        </label>
+        <label>Modifiers (comma-separated)
+          <input type="text" data-path="hotkeys.modifiers" data-kind="list">
+        </label>
+        <label>Toggle recording key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.toggle_recording">
+        </label>
+        <label>Discard recording key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.discard_recording">
+        </label>
+        <label>Toggle aside key
+          <input type="text" maxlength="1" data-path="hotkeys.keys.toggle_aside">
+        </label>
+      </fieldset>
+
+      <details>
+        <summary>Raw JSON (advanced)</summary>
+        <textarea id="settings-json" spellcheck="false"></textarea>
+      </details>
+    </div>
+    <footer>
+      <span id="settings-status"></span>
+      <button id="settings-reload">Reload current</button>
+      <button id="settings-save" class="primary">Save &amp; apply</button>
+    </footer>
+  </div>
+</div>
+
 <script>
 (function() {
   const $ = (id) => document.getElementById(id);
@@ -374,24 +718,52 @@ _INDEX_HTML = """<!doctype html>
   }
 
   let lastTranscript = '';
-  function renderTranscript(text) {
+  function renderSpanHtml(text, sourceClass) {
+    const escaped = escape(text);
+    const withMarkers = escaped.replace(MARKER_RE, (m, type, kind) => {
+      const cls = ['marker-pill', type].join(' ');
+      return `<span class="${cls}" title="${type}:${kind}">${type}:${kind}</span>`;
+    });
+    return `<span class="${sourceClass}">${withMarkers}</span>`;
+  }
+  function renderTranscript(s) {
     const el = $('transcript');
     const body = $('transcript-body');
     attachScrollWatcher(body);
-    lastTranscript = text || '';
-    if (!text) {
+    // Prefer merged spans when the HQ stream is producing them; fall back
+    // to the plain fast tail otherwise.
+    const spans = s.transcript_tail_merged;
+    const plain = s.transcript_tail || '';
+    const isEmpty = spans
+      ? spans.every(sp => !sp.text)
+      : !plain;
+    lastTranscript = spans
+      ? spans.map(sp => sp.text).join(' ')
+      : plain;
+    if (isEmpty) {
       el.className = 'empty copyable';
       el.textContent = 'no audio yet';
       return;
     }
     el.className = 'copyable';
     el.title = 'click to copy full transcript tail';
-    const escaped = escape(text);
-    const html = escaped.replace(MARKER_RE, (m, type, kind) => {
-      const cls = ['marker-pill', type].join(' ');
-      return `<span class="${cls}" title="${type}:${kind}">${type}:${kind}</span>`;
-    });
-    el.innerHTML = html;
+    if (spans && spans.length) {
+      const parts = [];
+      for (let i = 0; i < spans.length; i++) {
+        const sp = spans[i];
+        if (i > 0 && spans[i - 1].source === 'hq' && sp.source === 'fast') {
+          const edgeSec = s.hq && s.hq.leading_edge_seconds != null
+            ? s.hq.leading_edge_seconds.toFixed(1) + 's'
+            : '';
+          parts.push(`<span class="hq-edge" title="HQ leading edge">HQ→${edgeSec}</span>`);
+        }
+        const cls = sp.source === 'hq' ? 'src-hq' : 'src-fast';
+        parts.push(renderSpanHtml(sp.text || '', cls));
+      }
+      el.innerHTML = parts.join(' ');
+    } else {
+      el.innerHTML = renderSpanHtml(plain, 'src-fast');
+    }
     pinToBottomIfStuck(body);
   }
   // Single delegated click handler for the transcript element.
@@ -435,8 +807,25 @@ _INDEX_HTML = """<!doctype html>
   }
 
   function renderHeader(s) {
-    $('meta').textContent =
-      `${s.session_id} · ${s.model} (${s.device}) · ${s.chunk_count} chunk(s)`;
+    let meta = `${s.session_id} · ${s.model} (${s.device}) · ${s.chunk_count} chunk(s)`;
+    if (s.hq) {
+      const now = s.now_seconds || 0;
+      const edge = s.hq.leading_edge_seconds || 0;
+      const lag = Math.max(0, now - edge);
+      meta += ` · HQ:${s.hq.model.replace(/^faster-whisper:/, '')} (lag ${lag.toFixed(1)}s)`;
+    }
+    // Per-stream drop counters. Only render when something has actually
+    // been dropped so the header stays clean in healthy sessions.
+    if (s.stream_stats) {
+      for (const label of Object.keys(s.stream_stats)) {
+        const st = s.stream_stats[label];
+        const totalDrops = (st.dropped_queue_full || 0) + (st.dropped_silent || 0);
+        if (totalDrops > 0) {
+          meta += ` · ⚠ ${label} dropped ${st.dropped_queue_full || 0}q+${st.dropped_silent || 0}s`;
+        }
+      }
+    }
+    $('meta').textContent = meta;
     const cap = $('capture');
     cap.textContent = s.capture.mode;
     cap.className = 'pill ' + (s.capture.mode === 'r+aside' ? 'r-aside' : s.capture.mode);
@@ -565,14 +954,26 @@ _INDEX_HTML = """<!doctype html>
       const d = e.data || {};
       if (e.kind === 'audio_window' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
+        const isDrop = d.reason && d.reason.startsWith('dropped');
         const fill = d.reason === 'forced' ? '#ffa726'
                    : d.reason === 'silence' ? '#5fa8d3'
                    : d.reason === 'max_window' ? '#ec407a'
                    : d.reason === 'dropped_silent' ? '#3a3d45'
                    : d.reason === 'dropped_queue_full' ? '#d64545'
                    : '#5fa8d3';
-        const opacity = d.reason && d.reason.startsWith('dropped') ? 0.4 : 0.85;
-        parts.push(`<rect x="${x0}" y="20" width="${x1-x0}" height="20" fill="${fill}" opacity="${opacity}"><title>${escape(summarize(e))}</title></rect>`);
+        const opacity = isDrop ? 0.5 : 0.85;
+        const stroke = isDrop ? ' stroke="#ff5252" stroke-width="1.5" stroke-dasharray="3,2"' : '';
+        const title = escape(summarize(e));
+        parts.push(`<rect x="${x0}" y="20" width="${x1-x0}" height="20" fill="${fill}" opacity="${opacity}"${stroke}><title>${title}</title></rect>`);
+        if (isDrop) {
+          // Diagonal X across the bar so a dropped window is unmistakable
+          // even at a glance, plus a small ⚠ glyph just above it tagged
+          // with the drop reason.
+          parts.push(`<line x1="${x0}" y1="20" x2="${x1}" y2="40" stroke="#ff5252" stroke-width="1.5"><title>${title}</title></line>`);
+          parts.push(`<line x1="${x0}" y1="40" x2="${x1}" y2="20" stroke="#ff5252" stroke-width="1.5"><title>${title}</title></line>`);
+          const sym = d.reason === 'dropped_queue_full' ? '⚠Q' : '⚠S';
+          parts.push(`<text x="${x0+2}" y="18" fill="#ff5252" font-size="9" font-weight="bold">${sym}</text>`);
+        }
       } else if (e.kind === 'segment' && d.start != null && d.end != null) {
         const x0 = x(d.start), x1 = Math.max(x(d.end), x0+1);
         parts.push(`<rect x="${x0}" y="50" width="${x1-x0}" height="20" fill="#6abf4b" opacity="0.7"><title>${escape(summarize(e))}</title></rect>`);
@@ -613,7 +1014,7 @@ _INDEX_HTML = """<!doctype html>
       $('disconnected').style.display = 'none';
       renderHeader(s);
       renderPastes(s.paste_log);
-      renderTranscript(s.transcript_tail);
+      renderTranscript(s);
       renderEvents(s.debug_events || []);
       renderTimeline(s.debug_events || [], s.now_seconds || 0);
     } catch (e) {
@@ -632,6 +1033,151 @@ _INDEX_HTML = """<!doctype html>
     if (!document.hidden) poll();
   });
   window.addEventListener('focus', poll);
+
+  // ---- Settings: gear + modal -----------------------------------------
+  async function loadConfig() {
+    const r = await fetch('/config', { cache: 'no-store' });
+    if (!r.ok) throw new Error('GET /config ' + r.status);
+    return await r.json();
+  }
+  function setSettingsStatus(msg, isError) {
+    const el = $('settings-status');
+    el.textContent = msg;
+    el.style.color = isError ? 'var(--bad)' : 'var(--good)';
+  }
+  function getByPath(obj, path) {
+    return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+  }
+  function setByPath(obj, path, value) {
+    const parts = path.split('.');
+    let cur = obj;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object') {
+        cur[parts[i]] = {};
+      }
+      cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+  function fillFormFromConfig(cfg) {
+    document.querySelectorAll('#settings-modal [data-path]').forEach(el => {
+      const path = el.dataset.path;
+      const v = getByPath(cfg, path);
+      if (v === undefined) return;
+      if (el.type === 'checkbox') el.checked = !!v;
+      else if (el.dataset.kind === 'list' && Array.isArray(v)) el.value = v.join(', ');
+      else el.value = v;
+    });
+    renderMarkersTable(Array.isArray(cfg.markers) ? cfg.markers : []);
+    $('settings-json').value = JSON.stringify(cfg, null, 2);
+  }
+  function buildPatchFromForm() {
+    // Send only the structured-form fields. The advanced JSON textarea is
+    // a read-only mirror unless the user expanded it (in which case we
+    // merge it as base and overlay the form values on top).
+    let patch = {};
+    const raw = $('settings-json').value.trim();
+    if (raw) {
+      try { patch = JSON.parse(raw); } catch (e) { /* fall through */ }
+    }
+    document.querySelectorAll('#settings-modal [data-path]').forEach(el => {
+      const path = el.dataset.path;
+      let v;
+      if (el.type === 'checkbox') v = el.checked;
+      else if (el.type === 'number') v = el.value === '' ? null : Number(el.value);
+      else if (el.dataset.kind === 'list') {
+        v = el.value.split(',').map(s => s.trim()).filter(Boolean);
+      } else v = el.value;
+      if (v === null) return;
+      setByPath(patch, path, v);
+    });
+    patch.markers = readMarkersTable();
+    return patch;
+  }
+  // ---- Markers table editor (dynamic rows) ----
+  function renderMarkersTable(markers) {
+    const tbody = $('markers-tbody');
+    tbody.innerHTML = '';
+    markers.forEach(m => tbody.appendChild(buildMarkerRow(m)));
+  }
+  function buildMarkerRow(m) {
+    const tr = document.createElement('tr');
+    const cellStyle = 'padding:3px 4px';
+    const inputStyle =
+      'width:100%;background:#15171c;color:var(--fg);' +
+      'border:1px solid #3a3d45;border-radius:3px;padding:3px 6px;' +
+      'font-size:12px;box-sizing:border-box';
+    tr.innerHTML =
+      `<td style="${cellStyle}"><input class="m-key" maxlength="1" value="${escape(m.key || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle}"><input class="m-type" value="${escape(m.type || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle}"><input class="m-desc" value="${escape(m.description || '')}" style="${inputStyle}"></td>` +
+      `<td style="${cellStyle};text-align:center">` +
+      `<button type="button" class="m-del" title="remove" ` +
+      `style="background:transparent;border:none;color:var(--bad);cursor:pointer;font-size:16px;line-height:1">×</button></td>`;
+    tr.querySelector('.m-del').addEventListener('click', () => tr.remove());
+    return tr;
+  }
+  function readMarkersTable() {
+    const out = [];
+    $('markers-tbody').querySelectorAll('tr').forEach(tr => {
+      const key = tr.querySelector('.m-key').value.trim();
+      const type = tr.querySelector('.m-type').value.trim();
+      const description = tr.querySelector('.m-desc').value.trim();
+      if (key && type) out.push({ key, type, description });
+    });
+    return out;
+  }
+  $('markers-add').addEventListener('click', () => {
+    $('markers-tbody').appendChild(buildMarkerRow({ key: '', type: '', description: '' }));
+  });
+  async function refreshSettingsForm() {
+    try {
+      const cfg = await loadConfig();
+      fillFormFromConfig(cfg);
+      setSettingsStatus('loaded', false);
+    } catch (e) {
+      setSettingsStatus('load failed: ' + e.message, true);
+    }
+  }
+  function openSettings() {
+    $('settings-overlay').hidden = false;
+    refreshSettingsForm();
+  }
+  function closeSettings() {
+    $('settings-overlay').hidden = true;
+  }
+  $('settings-gear').addEventListener('click', openSettings);
+  $('settings-close').addEventListener('click', closeSettings);
+  $('settings-overlay').addEventListener('click', (ev) => {
+    if (ev.target === $('settings-overlay')) closeSettings();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !$('settings-overlay').hidden) closeSettings();
+  });
+  $('settings-reload').addEventListener('click', refreshSettingsForm);
+  $('settings-save').addEventListener('click', async () => {
+    const patch = buildPatchFromForm();
+    setSettingsStatus('saving…', false);
+    try {
+      const r = await fetch('/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const result = await r.json();
+      if (!r.ok || result.error) {
+        setSettingsStatus('error: ' + (result.error || r.status), true);
+        return;
+      }
+      const applied = (result.applied || []).join(', ') || '(no live changes)';
+      const deferred = (result.deferred || []).join(', ');
+      let msg = 'saved. live: ' + applied;
+      if (deferred) msg += '. deferred until restart: ' + deferred;
+      setSettingsStatus(msg, false);
+    } catch (e) {
+      setSettingsStatus('error: ' + e.message, true);
+    }
+  });
 })();
 </script>
 </body>
@@ -652,6 +1198,15 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
+    def _send_json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/" or self.path.startswith("/?"):
             body = _INDEX_HTML.encode("utf-8")
@@ -666,46 +1221,85 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 payload = self.server.snapshot_provider()  # type: ignore[attr-defined]
             except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                self._send_json(500, {"error": str(e)})
                 return
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(200, payload)
+            return
+        if self.path == "/config":
+            provider = getattr(self.server, "config_provider", None)
+            if provider is None:
+                self._send_json(404, {"error": "config not available"})
+                return
+            try:
+                self._send_json(200, provider())
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        self.send_error(404)
+
+    def do_PUT(self):  # noqa: N802
+        if self.path == "/config":
+            setter = getattr(self.server, "config_setter", None)
+            if setter is None:
+                self._send_json(404, {"error": "config update not available"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                new_data = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                self._send_json(400, {"error": f"bad JSON: {e}"})
+                return
+            try:
+                result = setter(new_data)
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+                return
+            self._send_json(200, {"ok": True, **(result or {})})
             return
         self.send_error(404)
 
 
 class _Server(ThreadingHTTPServer):
-    """Slight subclass that holds the snapshot provider for the handler."""
+    """Slight subclass that holds the snapshot/config callables for the handler."""
 
     daemon_threads = True
 
-    def __init__(self, addr, handler, snapshot_provider):
+    def __init__(self, addr, handler, snapshot_provider, config_provider=None,
+                 config_setter=None):
         super().__init__(addr, handler)
         self.snapshot_provider = snapshot_provider
+        self.config_provider = config_provider
+        self.config_setter = config_setter
 
 
 class StatusServer:
     """HTTP status server bound to a local port.
 
     The dashboard reads from ``snapshot_provider``, a zero-arg callable
-    returning a JSON-serializable dict.
+    returning a JSON-serializable dict. Optional ``config_provider`` and
+    ``config_setter`` enable the ``/config`` GET/PUT endpoints used by the
+    settings page in Phase 6.
     """
 
-    def __init__(self, snapshot_provider: Callable[[], dict]):
+    def __init__(
+        self,
+        snapshot_provider: Callable[[], dict],
+        config_provider: Optional[Callable[[], dict]] = None,
+        config_setter: Optional[Callable[[dict], Optional[dict]]] = None,
+    ):
         self._snapshot_provider = snapshot_provider
+        self._config_provider = config_provider
+        self._config_setter = config_setter
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self, host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
-        self._server = _Server((host, port), _Handler, self._snapshot_provider)
+        self._server = _Server(
+            (host, port), _Handler, self._snapshot_provider,
+            config_provider=self._config_provider,
+            config_setter=self._config_setter,
+        )
         bound_host, bound_port = self._server.server_address[:2]
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="StatusServer", daemon=True
