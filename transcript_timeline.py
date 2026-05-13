@@ -57,6 +57,9 @@ class MarkerType:
     key: str
     type: str
     description: str
+    # When True, a single tap inserts a zero-width start+end pair at the
+    # current audio time instead of toggling an open/close interval.
+    flag: bool = False
 
 
 @dataclass
@@ -322,6 +325,14 @@ class TranscriptTimeline:
             return None
         events: list[tuple[str, str]] = []
         with self._lock:
+            mt = self.marker_types.get(type_name)
+            if mt is not None and mt.flag:
+                # Single-point marker: emit start+end at the same audio time
+                # and don't disturb any currently open interval marker.
+                self.append_marker(type_name, "start")
+                self.append_marker(type_name, "end")
+                events.append(("flag", type_name))
+                return events
             if self._open_user_marker_type == type_name:
                 self.append_marker(type_name, "end")
                 self._open_user_marker_type = None

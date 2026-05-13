@@ -778,6 +778,7 @@ _INDEX_HTML = """<!doctype html>
               <th style="width:50px">Key</th>
               <th style="width:140px">Type</th>
               <th>Description</th>
+              <th style="width:60px" title="Flag = single-point marker (start+end at same time). Off = open/close interval.">Flag</th>
               <th style="width:32px"></th>
             </tr>
           </thead>
@@ -1422,6 +1423,8 @@ _INDEX_HTML = """<!doctype html>
       `<td style="${cellStyle}"><input class="m-type" value="${escape(m.type || '')}" style="${inputStyle}"></td>` +
       `<td style="${cellStyle}"><input class="m-desc" value="${escape(m.description || '')}" style="${inputStyle}"></td>` +
       `<td style="${cellStyle};text-align:center">` +
+      `<input type="checkbox" class="m-flag" title="single-point marker"${m.flag ? ' checked' : ''}></td>` +
+      `<td style="${cellStyle};text-align:center">` +
       `<button type="button" class="m-del" title="remove" ` +
       `style="background:transparent;border:none;color:var(--bad);cursor:pointer;font-size:16px;line-height:1">×</button></td>`;
     tr.querySelector('.m-del').addEventListener('click', () => tr.remove());
@@ -1433,12 +1436,13 @@ _INDEX_HTML = """<!doctype html>
       const key = tr.querySelector('.m-key').value.trim();
       const type = tr.querySelector('.m-type').value.trim();
       const description = tr.querySelector('.m-desc').value.trim();
-      if (key && type) out.push({ key, type, description });
+      const flag = tr.querySelector('.m-flag').checked;
+      if (key && type) out.push({ key, type, description, flag });
     });
     return out;
   }
   $('markers-add').addEventListener('click', () => {
-    $('markers-tbody').appendChild(buildMarkerRow({ key: '', type: '', description: '' }));
+    $('markers-tbody').appendChild(buildMarkerRow({ key: '', type: '', description: '', flag: false }));
   });
   async function refreshSettingsForm() {
     try {

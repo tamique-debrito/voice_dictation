@@ -100,11 +100,8 @@ class StreamConfig:
 
 
 def _default_hq_stream() -> "StreamConfig":
-    # HQ stream is off until Phase 3 wires it in; this default reflects the
-    # eventual intended settings (medium.en, beam search, prev-text context,
-    # larger windows). Override via local_config.json or env vars.
     return StreamConfig(
-        enabled=False,
+        enabled=True,
         # 40s gives faster-whisper more cross-window context than fast's 25s
         # without bumping into the 30s-30s context window boundary penalty.
         # The extra context past ~40s helps less than buffer-fill cost.
@@ -114,7 +111,7 @@ def _default_hq_stream() -> "StreamConfig":
         # = ~200MB worst case, which buys ~15-20 minutes of buffered speech.
         window_q_maxsize=64,
         fw=FasterWhisperConfig(
-            model="medium.en",
+            model="distil-large-v3",
             compute="int8",
             beam_size=5,
             condition_on_previous_text=True,

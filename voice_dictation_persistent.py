@@ -178,7 +178,12 @@ class PersistentApp:
 
         marker_cfgs = config.get("persistent", {}).get("markers", DEFAULT_MARKERS)
         self.marker_types = [
-            MarkerType(key=m["key"], type=m["type"], description=m["description"])
+            MarkerType(
+                key=m["key"],
+                type=m["type"],
+                description=m["description"],
+                flag=bool(m.get("flag", False)),
+            )
             for m in marker_cfgs
         ]
         self._marker_keys = {m.key for m in self.marker_types}
@@ -615,6 +620,9 @@ class PersistentApp:
                 "type": type_name, "action": action, "key": key,
             })
         for action, type_name in events:
+            if action == "flag":
+                self._done(f"flagged [magenta]{type_name}[/magenta]")
+                continue
             verb = "opened" if action == "open" else "closed"
             note = ""
             if len(events) > 1 and action == "close":
@@ -967,7 +975,11 @@ class PersistentApp:
 
     def _print_banner(self) -> None:
         marker_lines = "\n".join(
-            f"  [bold]{m.key} (x2)[/bold] - open/close marker: {m.type}  [dim]({m.description})[/dim]"
+            (
+                f"  [bold]{m.key} (x2)[/bold] - flag marker: {m.type}  [dim]({m.description})[/dim]"
+                if m.flag else
+                f"  [bold]{m.key} (x2)[/bold] - open/close marker: {m.type}  [dim]({m.description})[/dim]"
+            )
             for m in self.marker_types
         )
         body = (
