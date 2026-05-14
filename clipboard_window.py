@@ -30,6 +30,11 @@ class ClipboardWindow:
     start_cursor: Optional[int]
     end_press_time: float
     start_press_time: float
+    # Session/audio-time counterpart to ``end_press_time`` (which is stored
+    # in boot-monotonic time so PasteExecutor can use it as a deadline
+    # against ``time.monotonic()``). The slicer needs audio time for
+    # trailing-word trimming. ``None`` until ``_end_locked`` sets it.
+    end_press_session: Optional[float] = None
     spans: list[tuple[Optional[int], Optional[int]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -81,7 +86,7 @@ class ClipboardWindow:
                     s = timeline.cursor()
                 self.spans[i] = (s, e)
             sp = self.start_press_time if i == 0 else None
-            ep = self.end_press_time if i == len(self.spans) - 1 else None
+            ep = self.end_press_session if i == len(self.spans) - 1 else None
             parts.append(timeline.slice_for_paste_by_time(s, e, sp, ep))
         return " ".join(p for p in parts if p)
 
@@ -276,6 +281,7 @@ class ClipboardWindowManager:
         self._timeline.schedule_marker(cfg.marker_type, "end", press_session)
         window = self._active.pop(cfg.key)
         window.end_press_time = press_ts
+        window.end_press_session = press_session
         if cfg.can_park_others:
             for active_key, w in self._active.items():
                 if self._types[active_key].can_be_parked:

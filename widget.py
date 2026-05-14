@@ -1636,6 +1636,626 @@ _INDEX_HTML = """<!doctype html>
 """
 
 
+_ANNOTATE_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Annotate session</title>
+<style>
+  :root {
+    --bg: #1b1d23;
+    --panel: #24262d;
+    --panel2: #2c2f37;
+    --border: #3a3d46;
+    --text: #d8dae0;
+    --muted: #8b8f99;
+    --accent: #7aa2f7;
+    --good: #9ece6a;
+    --warn: #e0af68;
+    --bad: #f7768e;
+    --diff-ins: #2c4a30;
+    --diff-del: #4a2c30;
+    --hl: #3a3f5a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; font-size: 13px; }
+  body { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header { display: flex; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); gap: 16px; background: var(--panel); }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header .session { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  header .summary { margin-left: auto; color: var(--muted); }
+  main { display: grid; grid-template-columns: 240px 1fr; min-height: 0; }
+  #rail { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 6px 0; }
+  #rail .item { display: grid; grid-template-columns: 40px 1fr auto; gap: 8px; align-items: center; padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
+  #rail .item:hover { background: var(--panel2); }
+  #rail .item.active { background: var(--panel2); border-left-color: var(--accent); }
+  #rail .item.rejected { opacity: 0.45; }
+  #rail .idx { color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+  #rail .dur { color: var(--muted); font-size: 11px; }
+  .pill { font-size: 10px; padding: 1px 6px; border-radius: 10px; background: var(--panel2); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .pill.edited { background: var(--accent); color: #0d1117; }
+  .pill.accepted_fast { background: var(--good); color: #0d1117; }
+  .pill.accepted_hq { background: var(--good); color: #0d1117; }
+  .pill.rejected { background: var(--bad); color: #0d1117; }
+  .pill.partial { background: var(--warn); color: #0d1117; }
+  .pill.full { background: var(--good); color: #0d1117; }
+  #pane { display: grid; grid-template-rows: auto auto auto 1fr auto; min-height: 0; padding: 12px 16px; gap: 10px; }
+  #pane .chunkbar { display: flex; align-items: center; gap: 12px; }
+  #pane .chunkbar h2 { margin: 0; font-size: 15px; }
+  #pane .chunkbar .meta { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  #pane .chunkbar .right { margin-left: auto; display: flex; gap: 8px; }
+  #player { display: flex; align-items: center; gap: 10px; }
+  #player audio { flex: 1; height: 32px; }
+  #player .winrange { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-width: 180px; text-align: right; }
+  #segments { overflow-y: auto; padding-right: 4px; }
+  .seg { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .seg.active { border-color: var(--accent); }
+  .seg.now { background: var(--panel2); }
+  .seg .head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .seg .t { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; cursor: pointer; }
+  .seg .t:hover { color: var(--accent); }
+  .seg .actions { margin-left: auto; display: flex; gap: 6px; }
+  .seg .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .seg .col label { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .seg .orig { background: var(--panel2); padding: 6px 8px; border-radius: 4px; min-height: 44px; white-space: pre-wrap; word-break: break-word; }
+  .seg textarea { width: 100%; min-height: 44px; resize: vertical; background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 4px; font-family: inherit; font-size: 13px; line-height: 1.4; }
+  .seg textarea:focus { outline: none; border-color: var(--accent); }
+  .ins { background: var(--diff-ins); padding: 0 2px; border-radius: 2px; }
+  .del { background: var(--diff-del); padding: 0 2px; border-radius: 2px; text-decoration: line-through; opacity: 0.7; }
+  button { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 4px; font: inherit; font-size: 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  button.danger { background: var(--bad); color: #0d1117; border-color: var(--bad); }
+  button.danger.toggled { background: var(--panel2); color: var(--bad); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #footer { display: flex; align-items: center; gap: 12px; padding-top: 6px; border-top: 1px solid var(--border); }
+  #footer .hint { color: var(--muted); font-size: 11px; }
+  .strip { position: relative; height: 8px; background: var(--panel2); border-radius: 2px; overflow: hidden; margin: 4px 0 0; }
+  .strip .seg-block { position: absolute; top: 0; bottom: 0; background: var(--good); opacity: 0.6; }
+  .strip .cur { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--accent); }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Annotate</h1>
+  <span class="session" id="session-name">—</span>
+  <span class="summary" id="summary">—</span>
+</header>
+<main>
+  <aside id="rail"><div class="empty">loading…</div></aside>
+  <section id="pane">
+    <div class="chunkbar">
+      <h2 id="chunk-title">—</h2>
+      <span class="meta" id="chunk-meta"></span>
+      <div class="right">
+        <button id="btn-prev-chunk" title="↑">prev</button>
+        <button id="btn-next-chunk" title="↓">next</button>
+        <button id="btn-reject" class="danger" title="r">reject chunk</button>
+      </div>
+    </div>
+    <div id="player">
+      <audio id="audio" preload="auto" controls></audio>
+      <span class="winrange" id="winrange">—</span>
+    </div>
+    <div class="strip" id="strip"></div>
+    <div id="segments"><div class="empty">select a chunk</div></div>
+    <div id="footer">
+      <span class="hint">Space play · ↑/↓ chunk · ←/→ segment · Enter save · a accept-fast · h accept-hq · r reject</span>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+'use strict';
+
+const WINDOW_S = 15;  // ±15s around currentTime
+
+const state = {
+  chunks: [],        // [{idx, t_start, t_end, segments, alt_segments, ...}]
+  ann: { segments: {}, chunks: {} },
+  activeIdx: null,   // chunk idx currently loaded
+  segCursor: 0,      // index within current chunk's segments[]
+  pendingSaves: new Map(),  // segment_idx -> raw textarea value
+  lastVisibleKey: '',       // signature of currently-rendered segment set
+};
+
+const $ = (s) => document.querySelector(s);
+const audio = $('#audio');
+
+// -------------------------------------------------------------------------
+// Word-level diff for side-by-side highlighting.
+// -------------------------------------------------------------------------
+function tokenize(s) {
+  // Keep whitespace as its own token so reassembly preserves spacing.
+  return s.match(/\S+|\s+/g) || [];
+}
+function lcsOps(a, b) {
+  // Standard O(n*m) LCS DP — n,m up to ~50 tokens per segment, trivial.
+  const n = a.length, m = b.length;
+  const dp = Array.from({length: n+1}, () => new Int32Array(m+1));
+  for (let i = n-1; i >= 0; i--) for (let j = m-1; j >= 0; j--) {
+    dp[i][j] = a[i] === b[j] ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push(['eq', a[i]]); i++; j++; }
+    else if (dp[i+1][j] >= dp[i][j+1]) { ops.push(['del', a[i]]); i++; }
+    else { ops.push(['ins', b[j]]); j++; }
+  }
+  while (i < n) { ops.push(['del', a[i++]]); }
+  while (j < m) { ops.push(['ins', b[j++]]); }
+  return ops;
+}
+function diffHtml(orig, edited) {
+  if (orig === edited) {
+    return escapeHtml(orig);
+  }
+  const ops = lcsOps(tokenize(orig), tokenize(edited));
+  return ops.map(([op, tok]) => {
+    const safe = escapeHtml(tok);
+    if (op === 'eq') return safe;
+    if (op === 'ins') return tok.trim() ? `<span class="ins">${safe}</span>` : safe;
+    return tok.trim() ? `<span class="del">${safe}</span>` : '';
+  }).join('');
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// -------------------------------------------------------------------------
+// Data load / save
+// -------------------------------------------------------------------------
+async function loadManifest() {
+  const r = await fetch('/annotation/manifest', { cache: 'no-store' });
+  if (!r.ok) throw new Error('GET /annotation/manifest ' + r.status);
+  return r.json();
+}
+async function loadStatus() {
+  const r = await fetch('/status', { cache: 'no-store' });
+  if (!r.ok) return {};
+  return r.json();
+}
+async function putSegment(cIdx, sIdx, body) {
+  const r = await fetch(`/annotation/${cIdx}/${sIdx}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('PUT segment ' + r.status);
+  return r.json();
+}
+async function putChunk(cIdx, body) {
+  const r = await fetch(`/annotation/${cIdx}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('PUT chunk ' + r.status);
+  return r.json();
+}
+
+// -------------------------------------------------------------------------
+// Derived state
+// -------------------------------------------------------------------------
+function segAnnotation(cIdx, sIdx) {
+  return state.ann.segments[`${cIdx}_${sIdx}`] || null;
+}
+function chunkAnnotation(cIdx) {
+  return state.ann.chunks[String(cIdx)] || null;
+}
+function isRejected(cIdx) {
+  const a = chunkAnnotation(cIdx);
+  return a && a.status === 'rejected';
+}
+function chunkStatus(c) {
+  if (isRejected(c.idx)) return 'rejected';
+  const total = c.segments.length;
+  if (total === 0) return 'empty';
+  let done = 0;
+  for (const s of c.segments) if (segAnnotation(c.idx, s.segment_idx)) done++;
+  if (done === 0) return 'untouched';
+  if (done < total) return 'partial';
+  return 'full';
+}
+
+// -------------------------------------------------------------------------
+// Rendering
+// -------------------------------------------------------------------------
+function renderRail() {
+  const rail = $('#rail');
+  rail.innerHTML = '';
+  for (const c of state.chunks) {
+    const item = document.createElement('div');
+    item.className = 'item';
+    if (c.idx === state.activeIdx) item.classList.add('active');
+    if (isRejected(c.idx)) item.classList.add('rejected');
+    const status = chunkStatus(c);
+    item.innerHTML = `
+      <span class="idx">#${String(c.idx).padStart(3,'0')}</span>
+      <span class="dur">${c.duration_s.toFixed(1)}s · ${c.segments.length} seg</span>
+      <span class="pill ${status}">${status === 'untouched' ? '' : status}</span>
+    `;
+    item.addEventListener('click', () => selectChunk(c.idx));
+    rail.appendChild(item);
+  }
+  renderSummary();
+}
+
+function renderSummary() {
+  const total = state.chunks.length;
+  let touched = 0, rejected = 0;
+  for (const c of state.chunks) {
+    if (isRejected(c.idx)) { rejected++; continue; }
+    const status = chunkStatus(c);
+    if (status === 'partial' || status === 'full') touched++;
+  }
+  $('#summary').textContent = `${total} chunks · ${touched} edited · ${rejected} rejected`;
+}
+
+function activeChunk() {
+  return state.chunks.find(c => c.idx === state.activeIdx);
+}
+
+function currentWindow() {
+  const t = audio.currentTime || 0;
+  return [t - WINDOW_S, t + WINDOW_S];
+}
+
+function computeVisible(c) {
+  const [lo, hi] = currentWindow();
+  const sessLo = lo + c.t_start;
+  const sessHi = hi + c.t_start;
+  return c.segments.filter(s => s.t_end >= sessLo && s.t_start <= sessHi);
+}
+
+function visibleKey(visible) {
+  // Identity signature used to skip re-render when the set is unchanged.
+  return visible.map(s => s.segment_idx).join(',');
+}
+
+function focusedSegmentIdx() {
+  const el = document.activeElement;
+  if (!el || el.tagName !== 'TEXTAREA') return null;
+  const row = el.closest('.seg');
+  return row ? Number(row.dataset.sidx) : null;
+}
+
+function renderSegments(force) {
+  const wrap = $('#segments');
+  const c = activeChunk();
+  if (!c) {
+    wrap.innerHTML = '<div class="empty">select a chunk</div>';
+    state.lastVisibleKey = '';
+    return;
+  }
+  if (c.segments.length === 0) {
+    wrap.innerHTML = '<div class="empty">no segments in this chunk</div>';
+    state.lastVisibleKey = '';
+    return;
+  }
+  const audioT = audio.currentTime || 0;
+  $('#winrange').textContent =
+    `window ${(audioT - WINDOW_S).toFixed(1)}s → ${(audioT + WINDOW_S).toFixed(1)}s (chunk-rel)`;
+
+  const visible = computeVisible(c);
+  const key = visibleKey(visible);
+
+  // Skip rebuild when the visible set is the same — refresh only the
+  // ".now" highlight on the existing rows. Without this, the timeupdate
+  // event (~4 Hz) would tear down + re-create every textarea, dropping
+  // focus and caret position while the user is typing.
+  if (!force && key === state.lastVisibleKey) {
+    updateNowHighlights(c, audioT);
+    return;
+  }
+  // Never re-render while the user is typing — even a window change can
+  // wait until they tab out or scroll out of focus.
+  if (!force && focusedSegmentIdx() != null) {
+    updateNowHighlights(c, audioT);
+    return;
+  }
+
+  state.lastVisibleKey = key;
+  const sessAudio = audioT + c.t_start;
+  if (visible.length === 0) {
+    wrap.innerHTML = '<div class="empty">no segments in ±15s window — scrub to find some</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  for (const s of visible) {
+    const ann = segAnnotation(c.idx, s.segment_idx);
+    const draft = state.pendingSaves.get(s.segment_idx);
+    const edited = draft != null ? draft : (ann ? ann.text : s.text);
+    const status = ann ? ann.status : 'untouched';
+    const isNow = sessAudio >= s.t_start && sessAudio <= s.t_end;
+    const isActive = c.segments[state.segCursor] && c.segments[state.segCursor].segment_idx === s.segment_idx;
+
+    // Find a fast counterpart by time overlap (for Accept Fast).
+    const fastOverlap = (c.alt_segments || []).find(a =>
+      a.t_end >= s.t_start && a.t_start <= s.t_end
+    );
+
+    const row = document.createElement('div');
+    row.className = 'seg';
+    if (isNow) row.classList.add('now');
+    if (isActive) row.classList.add('active');
+    row.dataset.sidx = s.segment_idx;
+
+    const startRel = s.t_start - c.t_start;
+    const endRel = s.t_end - c.t_start;
+
+    row.innerHTML = `
+      <div class="head">
+        <span class="t" title="seek">${startRel.toFixed(2)}s – ${endRel.toFixed(2)}s</span>
+        <span class="pill ${status === 'untouched' ? '' : status}">${status === 'untouched' ? 'original' : status.replace('_',' ')}</span>
+        <div class="actions">
+          <button data-act="save">save</button>
+          ${fastOverlap ? '<button data-act="acceptFast" title="a">accept fast</button>' : ''}
+          ${s.stream === 'hq' ? '<button data-act="acceptHq" title="h">accept hq</button>' : ''}
+        </div>
+      </div>
+      <div class="pair">
+        <div class="col">
+          <label>original (${s.stream})</label>
+          <div class="orig">${diffHtml(s.text, edited)}</div>
+        </div>
+        <div class="col">
+          <label>edited</label>
+          <textarea spellcheck="false"></textarea>
+        </div>
+      </div>
+    `;
+    const ta = row.querySelector('textarea');
+    ta.value = edited;
+    ta.addEventListener('input', () => {
+      state.pendingSaves.set(s.segment_idx, ta.value);
+      // Re-render only this row's diff to avoid blowing the cursor.
+      row.querySelector('.orig').innerHTML = diffHtml(s.text, ta.value);
+    });
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey || !ev.shiftKey)) {
+        ev.preventDefault();
+        saveSegment(c.idx, s.segment_idx, ta.value, 'edited');
+      }
+    });
+    ta.addEventListener('focus', () => {
+      const i = c.segments.findIndex(x => x.segment_idx === s.segment_idx);
+      if (i >= 0) state.segCursor = i;
+    });
+    row.querySelector('.t').addEventListener('click', () => {
+      audio.currentTime = Math.max(0, startRel);
+    });
+    row.querySelector('[data-act="save"]').addEventListener('click', () => {
+      saveSegment(c.idx, s.segment_idx, ta.value, 'edited');
+    });
+    const af = row.querySelector('[data-act="acceptFast"]');
+    if (af) af.addEventListener('click', () => {
+      const txt = fastOverlap.text;
+      ta.value = txt;
+      saveSegment(c.idx, s.segment_idx, txt, 'accepted_fast');
+    });
+    const ah = row.querySelector('[data-act="acceptHq"]');
+    if (ah) ah.addEventListener('click', () => {
+      saveSegment(c.idx, s.segment_idx, s.text, 'accepted_hq');
+    });
+    wrap.appendChild(row);
+  }
+}
+
+function updateNowHighlights(c, audioT) {
+  // Cheap class toggling on already-rendered segment rows — does NOT
+  // touch any textarea, so it's safe to call from the timeupdate
+  // listener at audio's native ~4 Hz cadence.
+  const sessAudio = audioT + c.t_start;
+  const rows = document.querySelectorAll('#segments .seg');
+  rows.forEach(row => {
+    const sidx = Number(row.dataset.sidx);
+    const s = c.segments.find(x => x.segment_idx === sidx);
+    if (!s) return;
+    const isNow = sessAudio >= s.t_start && sessAudio <= s.t_end;
+    row.classList.toggle('now', isNow);
+  });
+  // Also refresh the winrange label so the user sees the window slide.
+  $('#winrange').textContent =
+    `window ${(audioT - WINDOW_S).toFixed(1)}s → ${(audioT + WINDOW_S).toFixed(1)}s (chunk-rel)`;
+}
+
+function renderStrip() {
+  const strip = $('#strip');
+  const c = activeChunk();
+  strip.innerHTML = '';
+  if (!c || !c.duration_s) return;
+  for (const seg of c.audio_segments || []) {
+    const b = document.createElement('div');
+    b.className = 'seg-block';
+    const left = (seg.wav_offset_s / c.duration_s) * 100;
+    const w = (seg.duration_s / c.duration_s) * 100;
+    b.style.left = left + '%';
+    b.style.width = w + '%';
+    strip.appendChild(b);
+  }
+  const cur = document.createElement('div');
+  cur.className = 'cur';
+  cur.id = 'strip-cur';
+  strip.appendChild(cur);
+  updateStripCursor();
+}
+
+function updateStripCursor() {
+  const c = activeChunk();
+  const cur = document.getElementById('strip-cur');
+  if (!c || !cur || !c.duration_s) return;
+  const pct = ((audio.currentTime || 0) / c.duration_s) * 100;
+  cur.style.left = pct + '%';
+}
+
+function renderChunkBar() {
+  const c = activeChunk();
+  if (!c) { $('#chunk-title').textContent = '—'; $('#chunk-meta').textContent = ''; return; }
+  $('#chunk-title').textContent = `Chunk #${String(c.idx).padStart(3,'0')}`;
+  $('#chunk-meta').textContent =
+    `${c.t_start.toFixed(2)}s – ${c.t_end.toFixed(2)}s · ${c.segments.length} segments · primary=${c.primary_stream}`;
+  const rj = $('#btn-reject');
+  if (isRejected(c.idx)) {
+    rj.classList.add('toggled');
+    rj.textContent = 'unreject chunk';
+  } else {
+    rj.classList.remove('toggled');
+    rj.textContent = 'reject chunk';
+  }
+}
+
+// -------------------------------------------------------------------------
+// Actions
+// -------------------------------------------------------------------------
+async function saveSegment(cIdx, sIdx, text, status) {
+  try {
+    await putSegment(cIdx, sIdx, { text, status });
+    // Refresh derived state from server-side store.
+    const m = await loadManifest();
+    state.ann = m.state || { segments: {}, chunks: {} };
+    state.pendingSaves.delete(sIdx);
+    renderRail();
+    renderSegments(true);
+  } catch (e) {
+    console.error(e);
+    alert('save failed: ' + e.message);
+  }
+}
+
+async function toggleReject(cIdx) {
+  const cur = isRejected(cIdx);
+  try {
+    await putChunk(cIdx, { status: cur ? 'unrejected' : 'rejected' });
+    const m = await loadManifest();
+    state.ann = m.state || { segments: {}, chunks: {} };
+    renderRail();
+    renderChunkBar();
+  } catch (e) {
+    alert('reject failed: ' + e.message);
+  }
+}
+
+function selectChunk(idx) {
+  if (state.activeIdx === idx) return;
+  state.activeIdx = idx;
+  state.segCursor = 0;
+  state.pendingSaves.clear();
+  const c = activeChunk();
+  if (c) {
+    audio.src = `/audio/${idx}`;
+    audio.currentTime = 0;
+  }
+  renderRail();
+  renderChunkBar();
+  renderStrip();
+  renderSegments(true);
+}
+
+function moveChunk(delta) {
+  if (state.chunks.length === 0) return;
+  const cur = state.chunks.findIndex(c => c.idx === state.activeIdx);
+  const next = state.chunks[Math.max(0, Math.min(state.chunks.length - 1, cur + delta))];
+  if (next) selectChunk(next.idx);
+}
+
+function moveSegment(delta) {
+  const c = activeChunk();
+  if (!c || c.segments.length === 0) return;
+  state.segCursor = Math.max(0, Math.min(c.segments.length - 1, state.segCursor + delta));
+  const s = c.segments[state.segCursor];
+  const relStart = s.t_start - c.t_start;
+  audio.currentTime = Math.max(0, relStart);
+}
+
+// -------------------------------------------------------------------------
+// Keyboard
+// -------------------------------------------------------------------------
+document.addEventListener('keydown', (ev) => {
+  const inText = ev.target && (ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'INPUT');
+  if (inText) {
+    // Only Enter (handled per-textarea) and modifier-shortcuts here.
+    return;
+  }
+  if (ev.key === ' ') {
+    ev.preventDefault();
+    if (audio.paused) audio.play(); else audio.pause();
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault(); moveChunk(-1);
+  } else if (ev.key === 'ArrowDown') {
+    ev.preventDefault(); moveChunk(1);
+  } else if (ev.key === 'ArrowLeft') {
+    ev.preventDefault(); moveSegment(-1);
+  } else if (ev.key === 'ArrowRight') {
+    ev.preventDefault(); moveSegment(1);
+  } else if (ev.key === 'r') {
+    if (state.activeIdx != null) toggleReject(state.activeIdx);
+  } else if (ev.key === 'a' || ev.key === 'h') {
+    // Accept-fast / accept-hq for the focused (cursor) segment.
+    const c = activeChunk();
+    if (!c) return;
+    const s = c.segments[state.segCursor];
+    if (!s) return;
+    if (ev.key === 'a') {
+      const fast = (c.alt_segments || []).find(x => x.t_end >= s.t_start && x.t_start <= s.t_end);
+      if (fast) saveSegment(c.idx, s.segment_idx, fast.text, 'accepted_fast');
+    } else if (s.stream === 'hq') {
+      saveSegment(c.idx, s.segment_idx, s.text, 'accepted_hq');
+    }
+  }
+});
+
+// -------------------------------------------------------------------------
+// Audio events
+// -------------------------------------------------------------------------
+audio.addEventListener('timeupdate', () => {
+  updateStripCursor();
+  // renderSegments() short-circuits to a class-toggle when the visible
+  // set is unchanged or a textarea has focus — so we can wire it to
+  // every timeupdate (~4 Hz) without trashing edit state.
+  renderSegments(false);
+});
+audio.addEventListener('seeked', () => {
+  // After a seek the visible set probably changed; let the renderer
+  // figure it out (still skipped if a textarea is focused — focus
+  // protection wins over scrub-driven re-render).
+  renderSegments(false);
+});
+
+// -------------------------------------------------------------------------
+// Top-bar wiring
+// -------------------------------------------------------------------------
+$('#btn-prev-chunk').addEventListener('click', () => moveChunk(-1));
+$('#btn-next-chunk').addEventListener('click', () => moveChunk(1));
+$('#btn-reject').addEventListener('click', () => {
+  if (state.activeIdx != null) toggleReject(state.activeIdx);
+});
+
+// -------------------------------------------------------------------------
+// Boot
+// -------------------------------------------------------------------------
+(async () => {
+  try {
+    const [status, manifest] = await Promise.all([loadStatus(), loadManifest()]);
+    $('#session-name').textContent = status.session_dir || '';
+    state.chunks = manifest.chunks || [];
+    state.ann = manifest.state || { segments: {}, chunks: {} };
+    renderRail();
+    if (state.chunks.length > 0) selectChunk(state.chunks[0].idx);
+  } catch (e) {
+    document.body.innerHTML = '<div style="padding:24px;color:#f7768e">load failed: ' + e.message + '</div>';
+  }
+})();
+})();
+</script>
+</body>
+</html>
+"""
+
+
 class _Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 + Content-Length on every response lets the browser keep one
     # TCP socket open across all polls. Under HTTP/1.0 (the BaseHTTPRequestHandler
@@ -1697,6 +2317,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/audio/"):
             self._serve_audio()
+            return
+        if self.path == "/annotate":
+            self._send_bytes(200, "text/html; charset=utf-8", _ANNOTATE_HTML.encode("utf-8"))
+            return
+        if self.path == "/annotation/manifest":
+            provider = getattr(self.server, "annotation_provider", None)
+            if provider is None:
+                self._send_json(404, {"error": "annotation mode not enabled"})
+                return
+            try:
+                self._send_json(200, provider())
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
             return
         self.send_error(404)
 
@@ -1796,7 +2429,45 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, {"ok": True, **(result or {})})
             return
+        if self.path.startswith("/annotation/"):
+            self._handle_annotation_put()
+            return
         self.send_error(404)
+
+    def _handle_annotation_put(self) -> None:
+        # /annotation/<c>          — chunk-level (rejection)
+        # /annotation/<c>/<s>      — segment-level (edited/accepted)
+        parts = self.path[len("/annotation/"):].split("/")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            body = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            self._send_json(400, {"error": f"bad JSON: {e}"})
+            return
+        try:
+            if len(parts) == 1 and parts[0]:
+                fn = getattr(self.server, "annotation_put_chunk", None)
+                if fn is None:
+                    self._send_json(404, {"error": "annotation mode not enabled"})
+                    return
+                result = fn(int(parts[0]), body)
+            elif len(parts) == 2:
+                fn = getattr(self.server, "annotation_put_segment", None)
+                if fn is None:
+                    self._send_json(404, {"error": "annotation mode not enabled"})
+                    return
+                result = fn(int(parts[0]), int(parts[1]), body)
+            else:
+                self._send_json(404, {"error": "bad annotation path"})
+                return
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
+            return
+        self._send_json(200, {"ok": True, "row": result})
 
 
 class _SnapshotCache:
@@ -1864,7 +2535,9 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, snapshot_cache, config_provider=None,
-                 config_setter=None, audio_dir=None):
+                 config_setter=None, audio_dir=None,
+                 annotation_provider=None, annotation_put_segment=None,
+                 annotation_put_chunk=None):
         super().__init__(addr, handler)
         self.snapshot_cache = snapshot_cache
         self.config_provider = config_provider
@@ -1873,6 +2546,12 @@ class _Server(ThreadingHTTPServer):
         # with HTTP Range support (so HTML5 <audio> can scrub). None = the
         # route returns 404. Set by ``StatusServer`` constructor.
         self.audio_dir = audio_dir
+        # Annotation-mode hooks. When non-None, the /annotate page and
+        # /annotation/* routes are live. Provider returns manifest+state;
+        # putters append to annotations.jsonl and return the saved row.
+        self.annotation_provider = annotation_provider
+        self.annotation_put_segment = annotation_put_segment
+        self.annotation_put_chunk = annotation_put_chunk
 
 
 class StatusServer:
@@ -1890,11 +2569,17 @@ class StatusServer:
         config_provider: Optional[Callable[[], dict]] = None,
         config_setter: Optional[Callable[[dict], Optional[dict]]] = None,
         audio_dir: Optional[str] = None,
+        annotation_provider: Optional[Callable[[], dict]] = None,
+        annotation_put_segment: Optional[Callable[[int, int, dict], dict]] = None,
+        annotation_put_chunk: Optional[Callable[[int, dict], dict]] = None,
     ):
         self._snapshot_provider = snapshot_provider
         self._config_provider = config_provider
         self._config_setter = config_setter
         self._audio_dir = audio_dir
+        self._annotation_provider = annotation_provider
+        self._annotation_put_segment = annotation_put_segment
+        self._annotation_put_chunk = annotation_put_chunk
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         self._cache: Optional[_SnapshotCache] = None
@@ -1907,6 +2592,9 @@ class StatusServer:
             config_provider=self._config_provider,
             config_setter=self._config_setter,
             audio_dir=self._audio_dir,
+            annotation_provider=self._annotation_provider,
+            annotation_put_segment=self._annotation_put_segment,
+            annotation_put_chunk=self._annotation_put_chunk,
         )
         bound_host, bound_port = self._server.server_address[:2]
         self._thread = threading.Thread(
