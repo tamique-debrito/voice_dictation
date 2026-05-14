@@ -63,6 +63,7 @@ from pynput import keyboard
 from rich.console import Console
 from rich.panel import Panel
 
+from audio_archiver import AudioArchiver
 from audio_fanout import AudioFanout
 from clipboard_manager import ClipboardManager
 from clipboard_window import (
@@ -165,7 +166,8 @@ class DebugLog:
 
 class PersistentApp:
     def __init__(self, config: dict, model: str, device: str, compute: str,
-                 enable_widget: bool = True, open_browser: bool = False):
+                 enable_widget: bool = True, open_browser: bool = False,
+                 save_audio_override: Optional[bool] = None):
         self.console = Console()
         self.config = config
         self._stop = threading.Event()
@@ -175,6 +177,14 @@ class PersistentApp:
         self._started_at = datetime.now(tz=timezone.utc)
         self._device = device
         self._compute = compute
+        # CLI flag wins over the config flag so a user can opt in without
+        # editing local_config.json. None = follow config; True/False = override.
+        self._save_audio = (
+            save_audio_override
+            if save_audio_override is not None
+            else bool(CFG.persistent.save_audio)
+        )
+        self._audio_archiver: Optional[AudioArchiver] = None
 
         marker_cfgs = config.get("persistent", {}).get("markers", DEFAULT_MARKERS)
         self.marker_types = [
@@ -207,7 +217,21 @@ class PersistentApp:
         # buffers, markers (one list, anchored to audio_time), chunk files
         # (canonical + per-stream raw). All transcription streams ingest
         # segments into this single object.
-        self.timeline = TranscriptTimeline(marker_types=self.marker_types)
+        self.timeline = TranscriptTimeline(
+            marker_types=self.marker_types,
+            on_canonical_flush=self._on_canonical_flush,
+        )
+
+        # Optional per-chunk audio archiver. Subscribes to the fanout (same
+        # frames the streams see) and is invoked by ``_on_canonical_flush``
+        # when a chunk_NNN.txt is written.
+        if self._save_audio:
+            archive_q = self.audio_fanout.subscribe(maxsize=400)
+            self._audio_archiver = AudioArchiver(
+                audio_q=archive_q,
+                stop_event=self._stop,
+                sample_rate=CFG.audio.sample_rate,
+            )
 
         # Fast / live transcription stream — drives live paste + the
         # WebSocket stream broadcast and the canonical chunk flush ticks.
@@ -359,6 +383,30 @@ class PersistentApp:
             return
         if path:
             self.console.print(f"[dim]💾 chunk → {os.path.basename(path)}[/dim]")
+
+    def _on_canonical_flush(self, event: dict) -> None:
+        """Fired by TranscriptTimeline whenever a chunk_NNN.txt is written.
+
+        When --save-audio is on, slice the archiver's ring buffer over the
+        chunk's [t_start, t_end] window and write the matching chunk_NNN.wav
+        plus a manifest row. Silently no-op when archiving is disabled.
+        """
+        if self._audio_archiver is None:
+            return
+        try:
+            wav_path = self._audio_archiver.write_chunk(
+                idx=int(event["idx"]),
+                t_start=float(event["t_start"]),
+                t_end=float(event["t_end"]),
+                session_dir=self.timeline.session_dir,
+                canonical_text=str(event.get("text", "")),
+            )
+        except Exception:
+            return
+        if wav_path:
+            self.console.print(
+                f"[dim]🎙️  audio → {os.path.basename(wav_path)}[/dim]"
+            )
 
     # ------------------------------------------------------------------
     # HQ stream lifecycle (live enable / disable)
@@ -805,6 +853,12 @@ class PersistentApp:
                 f"status_snapshots.jsonl[/dim]"
             )
         self.audio_fanout.start()
+        if self._audio_archiver is not None:
+            self._audio_archiver.start()
+            self.console.print(
+                f"[dim]🎙️ saving per-chunk audio → "
+                f"{os.path.join(self.timeline.session_dir, 'audio')}[/dim]"
+            )
         self._stream_server.start()
         # Start each stream individually so a single stream's startup
         # failure (most commonly an HQ model that isn't cached yet) is
@@ -1023,6 +1077,24 @@ def main():
                              "model versions on this run. Default is offline "
                              "load from cache for fast, network-independent "
                              "startup.")
+    parser.add_argument(
+        "--save-audio",
+        dest="save_audio",
+        default=None,
+        action="store_const",
+        const=True,
+        help="Persist per-chunk audio (chunk_NNN.wav) under the session "
+             "dir for later annotation / fine-tuning. Overrides the "
+             "persistent.save_audio config flag for this run.",
+    )
+    parser.add_argument(
+        "--no-save-audio",
+        dest="save_audio",
+        action="store_const",
+        const=False,
+        help="Disable per-chunk audio persistence for this run "
+             "(overrides persistent.save_audio config flag).",
+    )
     args = parser.parse_args()
 
     if not args.check_updates:
@@ -1053,6 +1125,7 @@ def main():
         compute=args.compute,
         enable_widget=not args.no_widget,
         open_browser=args.open_browser,
+        save_audio_override=args.save_audio,
     )
     if args.check_updates:
         # If the model loaded successfully (PersistentApp constructor builds

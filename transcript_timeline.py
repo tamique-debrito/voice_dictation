@@ -121,10 +121,17 @@ class TranscriptTimeline:
         transcripts_dir: str = TRANSCRIPTS_DIR,
         token_target: int = CHUNK_TOKEN_TARGET,
         session_id: Optional[str] = None,
+        on_canonical_flush: Optional[Callable[[dict], None]] = None,
     ):
         self.marker_types = {m.type: m for m in marker_types}
         self._key_to_type = {m.key: m.type for m in marker_types}
         self._token_target = token_target
+        # Fired after a canonical chunk_NNN.txt is written. Payload:
+        # {"idx": int, "path": str, "t_start": float, "t_end": float, "text": str}.
+        # ``t_start``/``t_end`` are session-monotonic seconds of the first/last
+        # word in the flushed chunk. Used by AudioArchiver to write the
+        # matching chunk_NNN.wav.
+        self._on_canonical_flush = on_canonical_flush
 
         self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(transcripts_dir, self.session_id)
@@ -869,6 +876,7 @@ class TranscriptTimeline:
         periodically). Flushes canonical + raw chunk writers when their
         thresholds are met."""
         canonical_path: Optional[str] = None
+        flush_event: Optional[dict] = None
         with self._lock:
             self._ensure_render()
             full = self._render_text  # use clean text for chunk bookkeeping
@@ -902,13 +910,32 @@ class TranscriptTimeline:
                 if path:
                     self._canonical_emitted_chars = len(full)
                     canonical_path = path
+                    if self._on_canonical_flush is not None and pending_offsets:
+                        # chunk_count is one-past the just-flushed index.
+                        flushed_idx = self._canonical_writer.chunk_count - 1
+                        t_hi = pending_offsets[-1][2]
+                        flush_event = {
+                            "idx": flushed_idx,
+                            "path": path,
+                            "t_start": float(t_lo),
+                            "t_end": float(t_hi),
+                            "text": pending_with_markers,
+                        }
             for s in self._streams.values():
                 if s.raw_chunk_writer is not None:
                     s.raw_chunk_writer.maybe_flush(at_silence_boundary)
+        # Fire the canonical-flush callback OUTSIDE the timeline lock so the
+        # listener (audio archiver) can't deadlock against ingest_segment.
+        if flush_event is not None and self._on_canonical_flush is not None:
+            try:
+                self._on_canonical_flush(flush_event)
+            except Exception:
+                pass
         return canonical_path
 
     def force_flush(self) -> dict:
         paths: dict[str, Optional[str]] = {}
+        flush_event: Optional[dict] = None
         with self._lock:
             # At shutdown no more segments arrive, so any markers anchored
             # past the current fast watermark would never become eligible
@@ -918,6 +945,8 @@ class TranscriptTimeline:
             self._ensure_render()
             full = self._render_text
             pending = full[self._canonical_emitted_chars:]
+            pending_offsets: list[tuple[int, float, float]] = []
+            pending_with_markers = ""
             if pending.strip():
                 markers = self._eligible_markers_locked()
                 pending_offsets = [
@@ -930,10 +959,25 @@ class TranscriptTimeline:
                 )
                 self._canonical_writer.append(pending_with_markers)
             self._canonical_emitted_chars = len(full)
-            paths["canonical"] = self._canonical_writer.force_flush()
+            canonical_path = self._canonical_writer.force_flush()
+            paths["canonical"] = canonical_path
+            if canonical_path and pending_offsets:
+                flush_event = {
+                    "idx": self._canonical_writer.chunk_count - 1,
+                    "path": canonical_path,
+                    "t_start": float(pending_offsets[0][1]),
+                    "t_end": float(pending_offsets[-1][2]),
+                    "text": pending_with_markers,
+                }
             for sid, s in self._streams.items():
                 if s.raw_chunk_writer is not None:
                     paths[sid] = s.raw_chunk_writer.force_flush()
+        # Fire outside the timeline lock (see tick()).
+        if flush_event is not None and self._on_canonical_flush is not None:
+            try:
+                self._on_canonical_flush(flush_event)
+            except Exception:
+                pass
         return paths
 
     # ------------------------------------------------------------------

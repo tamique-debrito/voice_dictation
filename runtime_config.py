@@ -157,6 +157,11 @@ class PersistentConfig:
     # Seconds between status-snapshot writes during recording. Smaller =
     # finer replay temporal resolution; larger = less I/O.
     debug_snapshot_interval_s: float = 2.0
+    # When True, persist per-chunk audio (16kHz mono int16 WAV) under
+    # session_dir/audio/chunk_NNN.wav, aligned with chunk_NNN.txt. Drives
+    # the annotation + Whisper fine-tune workflow. Off by default because
+    # most sessions don't need audio retained.
+    save_audio: bool = False
     # Bare double-tap key that stamps a high-visibility ``debug_flag`` event
     # into the timeline. Must not collide with marker keys, clipboard keys,
     # or the other bare actions ({"x", "q", "m"}). Single character.

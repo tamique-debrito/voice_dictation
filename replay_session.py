@@ -61,6 +61,7 @@ class ReplayController:
         events: list[dict],
         snapshots: list[dict],
         speed: float = 1.0,
+        audio_manifest: Optional[list[dict]] = None,
     ):
         self.session_dir = session_dir
         self.events = events
@@ -78,6 +79,13 @@ class ReplayController:
                 self.snapshots[-1].get("uptime_seconds", 0.0),
                 self.events[-1].get("ts", 0.0) if self.events else 0.0,
             )
+        # Per-chunk audio manifest (optional). Each row is what
+        # AudioArchiver.write_chunk wrote: {idx, audio_path, t_start, t_end,
+        # duration_s, ...}. The widget UI uses this to drive an <audio>
+        # element synced to the replay clock at ``self.speed``×.
+        self.audio_manifest: list[dict] = sorted(
+            audio_manifest or [], key=lambda r: r.get("t_start", 0.0)
+        )
 
     def reset(self) -> None:
         self._t0 = time.monotonic()
@@ -127,6 +135,20 @@ class ReplayController:
             "duration_seconds": round(self._duration, 3),
             "elapsed_seconds": round(now, 3),
         }
+        if self.audio_manifest:
+            # Trim payload: UI only needs the index/time fields per chunk.
+            out["audio"] = {
+                "available": True,
+                "chunks": [
+                    {
+                        "idx": int(r["idx"]),
+                        "t_start": float(r.get("t_start", 0.0)),
+                        "t_end": float(r.get("t_end", 0.0)),
+                        "duration_s": float(r.get("duration_s", 0.0)),
+                    }
+                    for r in self.audio_manifest
+                ],
+            }
         return out
 
 
@@ -164,8 +186,18 @@ def main() -> None:
     snapshots = _load_jsonl(snapshots_path)
     print(f"loaded {len(events)} debug events, {len(snapshots)} status snapshots")
 
+    # If the session was recorded with --save-audio, load the per-chunk
+    # manifest so the UI can play synced audio during replay.
+    audio_dir = os.path.join(session_dir, "audio")
+    audio_manifest: list[dict] = []
+    if os.path.isdir(audio_dir):
+        audio_manifest = _load_jsonl(os.path.join(audio_dir, "manifest.jsonl"))
+        if audio_manifest:
+            print(f"loaded {len(audio_manifest)} audio chunks from {audio_dir}")
+
     controller = ReplayController(
-        session_dir, events, snapshots, speed=args.speed
+        session_dir, events, snapshots, speed=args.speed,
+        audio_manifest=audio_manifest,
     )
 
     # Read-only widget: config GET returns the snapshot's saved config view
@@ -185,6 +217,7 @@ def main() -> None:
         status_provider,
         config_provider=config_provider,
         config_setter=config_setter,
+        audio_dir=audio_dir if audio_manifest else None,
     )
     host, port = server.start(port=args.port)
     print(f"replay widget: http://{host}:{port}")

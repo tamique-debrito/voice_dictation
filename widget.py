@@ -13,6 +13,7 @@ needs no external assets and works fully offline.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
@@ -506,6 +507,11 @@ _INDEX_HTML = """<!doctype html>
 </header>
 <div id="stale-banner">⚠ disconnected from monitoring service</div>
 <div id="copy-toast">copied</div>
+<div id="replay-audio-wrap" style="display:none; padding:6px 10px; background:#1b1f24; border-bottom:1px solid #2a2f36; display:flex; align-items:center; gap:10px;">
+  <span style="font-size:11px; color:#9aa4ad;">🔊 session audio</span>
+  <audio id="replay-audio" controls preload="auto" style="flex:1; height:32px;"></audio>
+  <span id="replay-audio-status" style="font-size:11px; color:#6f7780;"></span>
+</div>
 <main>
   <section id="pastes-section" class="collapsible" data-state="collapsed">
     <h2><span class="chev">▸</span>Paste log</h2>
@@ -628,6 +634,11 @@ _INDEX_HTML = """<!doctype html>
         </label>
         <label>Snapshot interval (s)
           <input type="number" step="0.5" min="0.5" max="60" data-path="persistent.debug_snapshot_interval_s">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-path="persistent.save_audio">
+          Save per-chunk audio (chunk_NNN.wav) for annotation / fine-tune
+          <span class="deferred-note">(applies on next launch)</span>
         </label>
       </fieldset>
 
@@ -1270,6 +1281,111 @@ _INDEX_HTML = """<!doctype html>
     svg.innerHTML = parts.join('');
   }
 
+  // -----------------------------------------------------------------
+  // Replay audio sync
+  // -----------------------------------------------------------------
+  // When the replayed session was recorded with --save-audio, each chunk
+  // has a corresponding chunk_NNN.wav. The status payload's `audio.chunks`
+  // is the sorted list of {idx, t_start, t_end, duration_s}. As the replay
+  // clock (now_seconds) advances, we point an <audio> element at whichever
+  // chunk currently covers `now_seconds`, seek inside that chunk to
+  // `now - chunk.t_start`, and set playbackRate to replay.speed so the
+  // audio advances at the same rate as the timeline.
+  //
+  // Between chunks (silence regions in the original recording) we pause
+  // the element; on the next chunk's onset we load the new src and play.
+  // We avoid fighting the user: explicit pauses are honored until they
+  // click play again, and we only force-resync currentTime when drift
+  // exceeds 0.4 s (otherwise we let the audio's own clock advance).
+  const audioEl = $('replay-audio');
+  const audioWrap = $('replay-audio-wrap');
+  const audioStatus = $('replay-audio-status');
+  let currentAudioChunkIdx = null;
+  let userPaused = false;
+  if (audioEl) {
+    audioEl.addEventListener('pause', () => {
+      // Distinguish user-initiated pause from our own programmatic
+      // pause (e.g. silence gap). If the replay is still running and
+      // we are inside a chunk, the user paused; honor that until play.
+      if (!audioEl.dataset.programmaticPause) userPaused = true;
+      audioEl.dataset.programmaticPause = '';
+    });
+    audioEl.addEventListener('play', () => { userPaused = false; });
+  }
+
+  function findChunkAt(chunks, t) {
+    // chunks sorted by t_start. Linear scan is fine — typical sessions
+    // have <500 chunks. Returns the chunk covering t, else null.
+    for (const c of chunks) {
+      if (t >= c.t_start && t <= c.t_end) return c;
+      if (c.t_start > t) return null;  // sorted, no later chunk can cover t
+    }
+    return null;
+  }
+
+  function syncReplayAudio(s) {
+    if (!audioEl) return;
+    const replay = s.replay;
+    const audio = s.audio;
+    if (!replay || !replay.mode || !audio || !audio.available
+        || !audio.chunks || audio.chunks.length === 0) {
+      audioWrap.style.display = 'none';
+      if (!audioEl.paused) {
+        audioEl.dataset.programmaticPause = '1';
+        audioEl.pause();
+      }
+      return;
+    }
+    audioWrap.style.display = 'flex';
+    const now = Number(s.now_seconds || 0);
+    const chunk = findChunkAt(audio.chunks, now);
+    const speed = Number(replay.speed || 1.0);
+
+    if (chunk === null) {
+      // Between chunks — silence period. Pause but keep src loaded.
+      audioStatus.textContent = 'silence';
+      if (!audioEl.paused) {
+        audioEl.dataset.programmaticPause = '1';
+        audioEl.pause();
+      }
+      return;
+    }
+
+    const targetSrc = '/audio/' + chunk.idx;
+    if (currentAudioChunkIdx !== chunk.idx) {
+      // Load new chunk. Setting .src triggers reload; once metadata is
+      // ready we seek and play.
+      currentAudioChunkIdx = chunk.idx;
+      audioEl.src = targetSrc;
+      audioEl.playbackRate = Math.max(0.0625, Math.min(16, speed));
+      audioStatus.textContent = 'chunk ' + chunk.idx;
+      const onReady = () => {
+        audioEl.removeEventListener('loadedmetadata', onReady);
+        const pos = Math.max(0, now - chunk.t_start);
+        try { audioEl.currentTime = pos; } catch (e) { /* not seekable yet */ }
+        if (!userPaused) {
+          audioEl.play().catch(() => { /* autoplay blocked — user must click ▶ */ });
+        }
+      };
+      audioEl.addEventListener('loadedmetadata', onReady);
+      return;
+    }
+
+    // Same chunk as last tick — keep playing, just nudge rate and check drift.
+    if (Math.abs(audioEl.playbackRate - speed) > 0.001) {
+      audioEl.playbackRate = Math.max(0.0625, Math.min(16, speed));
+    }
+    const expected = Math.max(0, now - chunk.t_start);
+    if (!isNaN(audioEl.currentTime) && Math.abs(audioEl.currentTime - expected) > 0.4) {
+      try { audioEl.currentTime = expected; } catch (e) { /* ignore */ }
+    }
+    if (audioEl.paused && !userPaused) {
+      audioEl.play().catch(() => {});
+    }
+    audioStatus.textContent = 'chunk ' + chunk.idx
+      + ' @ ' + expected.toFixed(1) + 's / ' + chunk.duration_s.toFixed(1) + 's';
+  }
+
   // Track when we last got a successful snapshot. The staleness chip is
   // rendered off this timestamp by a separate 250ms tick that runs
   // independently of the fetch loop, so a single slow/failed poll never
@@ -1295,6 +1411,7 @@ _INDEX_HTML = """<!doctype html>
       renderTranscript(s);
       renderEvents(s.debug_events || []);
       renderTimeline(s.debug_events || [], s.now_seconds || 0);
+      syncReplayAudio(s);
     } catch (e) {
       console.warn('poll failed:', e);
     } finally {
@@ -1546,7 +1663,86 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": str(e)})
             return
+        if self.path.startswith("/audio/"):
+            self._serve_audio()
+            return
         self.send_error(404)
+
+    def _serve_audio(self) -> None:
+        """GET /audio/<idx> — serve chunk_<idx>.wav from server.audio_dir.
+
+        Supports HTTP Range requests (single-range only) so the browser's
+        <audio> element can scrub mid-file. Without Range the whole file
+        is sent inline."""
+        audio_dir = getattr(self.server, "audio_dir", None)
+        if not audio_dir:
+            self.send_error(404)
+            return
+        # Path: /audio/<idx>(.wav)?  Accept either form.
+        suffix = self.path[len("/audio/"):]
+        if suffix.endswith(".wav"):
+            suffix = suffix[:-4]
+        try:
+            idx = int(suffix)
+        except ValueError:
+            self.send_error(404)
+            return
+        # Guard against escapes; idx is now an int so it can't traverse.
+        wav_path = os.path.join(audio_dir, f"chunk_{idx:03d}.wav")
+        if not os.path.isfile(wav_path):
+            self.send_error(404)
+            return
+        try:
+            size = os.path.getsize(wav_path)
+        except OSError:
+            self.send_error(500)
+            return
+
+        range_header = self.headers.get("Range")
+        start = 0
+        end = size - 1
+        is_partial = False
+        if range_header and range_header.startswith("bytes="):
+            spec = range_header[len("bytes="):].split(",", 1)[0].strip()
+            try:
+                a, b = spec.split("-", 1)
+                if a:
+                    start = int(a)
+                if b:
+                    end = int(b)
+                if start < 0 or end >= size or start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                is_partial = True
+            except ValueError:
+                self.send_error(400)
+                return
+
+        length = end - start + 1
+        code = 206 if is_partial else 200
+        self.send_response(code)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if is_partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with open(wav_path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_PUT(self):  # noqa: N802
         if self.path == "/config":
@@ -1636,11 +1832,15 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, snapshot_cache, config_provider=None,
-                 config_setter=None):
+                 config_setter=None, audio_dir=None):
         super().__init__(addr, handler)
         self.snapshot_cache = snapshot_cache
         self.config_provider = config_provider
         self.config_setter = config_setter
+        # When set, /audio/<idx> serves chunk_<idx>.wav from this directory
+        # with HTTP Range support (so HTML5 <audio> can scrub). None = the
+        # route returns 404. Set by ``StatusServer`` constructor.
+        self.audio_dir = audio_dir
 
 
 class StatusServer:
@@ -1657,10 +1857,12 @@ class StatusServer:
         snapshot_provider: Callable[[], dict],
         config_provider: Optional[Callable[[], dict]] = None,
         config_setter: Optional[Callable[[dict], Optional[dict]]] = None,
+        audio_dir: Optional[str] = None,
     ):
         self._snapshot_provider = snapshot_provider
         self._config_provider = config_provider
         self._config_setter = config_setter
+        self._audio_dir = audio_dir
         self._server: Optional[_Server] = None
         self._thread: Optional[threading.Thread] = None
         self._cache: Optional[_SnapshotCache] = None
@@ -1672,6 +1874,7 @@ class StatusServer:
             (host, port), _Handler, self._cache,
             config_provider=self._config_provider,
             config_setter=self._config_setter,
+            audio_dir=self._audio_dir,
         )
         bound_host, bound_port = self._server.server_address[:2]
         self._thread = threading.Thread(
