@@ -59,7 +59,6 @@ else:
 _HF_CHECK_FILE = os.path.join(os.path.dirname(__file__), ".last_hf_check")
 _HF_CHECK_STALE_SECONDS = 30 * 24 * 3600  # 30 days
 
-from pynput import keyboard
 from rich.console import Console
 from rich.panel import Panel
 
@@ -67,10 +66,10 @@ from audio_archiver import AudioArchiver
 from audio_fanout import AudioFanout
 from clipboard_manager import ClipboardManager
 from clipboard_window import (
-    ClipboardWindow,
     ClipboardWindowManager,
     ClipboardWindowType,
 )
+from paste_executor import PasteExecutor
 from config import (
     ASIDE_MARKER_TYPE,
     CHUNK_TOKEN_TARGET,
@@ -87,81 +86,17 @@ from config import (
     WIDGET_PORT,
 )
 from transcript_stream_server import TranscriptStreamServer
-from hotkeys import BareDoubleTap, key_char, load_config
+from hotkeys import load_config
 from persistent_recorder import PersistentRecorder
 from runtime_config import CFG, apply_dict_to_config, save_runtime_config, to_dict
-from status_snapshot import build_status
+from session_state import SessionState
 from transcript_timeline import MarkerType, TranscriptTimeline
 from transcription_stream import TranscriptionStream
+from user_action_producer import UserActionProducer
 import widget as widget_module
 
 
-# Maximum time to wait for the transcriber to catch up with a clipboard-window
-# end-press before pasting whatever we have.
-PASTE_DRAIN_TIMEOUT = 6.0
-
-
-class DebugLog:
-    """Thread-safe ring buffer of typed debug events.
-
-    Each event is ``{"ts": session_seconds, "kind": str, "data": dict}``.
-    The widget reads a snapshot via ``snapshot()`` from the status payload.
-    """
-
-    def __init__(self, maxlen: int = 2000):
-        self._events: deque = deque(maxlen=maxlen)
-        self._lock = threading.Lock()
-        self._origin: Optional[float] = None
-        # Optional append-only persistence — when ``set_output_path`` is
-        # called, every event written to the ring is also flushed to a
-        # JSONL file for post-session replay.
-        self._out_path: Optional[str] = None
-        self._out_file = None
-
-    def bind_origin(self, origin_monotonic: float) -> None:
-        self._origin = origin_monotonic
-
-    def set_output_path(self, path: str) -> None:
-        """Open a JSONL file at ``path`` to persist all events for replay."""
-        try:
-            self._out_file = open(path, "a", buffering=1, encoding="utf-8")
-            self._out_path = path
-        except OSError:
-            self._out_file = None
-
-    def close_output(self) -> None:
-        if self._out_file is not None:
-            try:
-                self._out_file.close()
-            except Exception:
-                pass
-            self._out_file = None
-
-    def _now(self) -> float:
-        if self._origin is None:
-            return 0.0
-        return time.monotonic() - self._origin
-
-    def log(self, kind: str, data: dict, ts: Optional[float] = None) -> None:
-        evt = {
-            "ts": round(ts if ts is not None else self._now(), 3),
-            "kind": kind,
-            "data": data,
-        }
-        with self._lock:
-            self._events.append(evt)
-            if self._out_file is not None:
-                try:
-                    import json as _json
-                    self._out_file.write(_json.dumps(evt) + "\n")
-                except Exception:
-                    pass
-
-    def snapshot(self, limit: int = 500) -> list[dict]:
-        with self._lock:
-            if limit >= len(self._events):
-                return list(self._events)
-            return list(self._events)[-limit:]
+# PASTE_DRAIN_TIMEOUT lives in PasteExecutor now (as DEFAULT_DRAIN_TIMEOUT).
 
 
 class PersistentApp:
@@ -205,9 +140,6 @@ class PersistentApp:
 
         self._state_lock = threading.Lock()
 
-        # Granular debug-event ring buffer surfaced to the widget.
-        self._debug = DebugLog(maxlen=2000)
-
         # AudioFanout drains raw_q, owns mute, and broadcasts frames to per-
         # stream input queues. Mute transitions emit a MUTE_RESET sentinel
         # that downstream aggregators consume to reset partial windows.
@@ -220,6 +152,18 @@ class PersistentApp:
         self.timeline = TranscriptTimeline(
             marker_types=self.marker_types,
             on_canonical_flush=self._on_canonical_flush,
+        )
+
+        # SessionState: absorbs the legacy DebugLog ring buffer + the
+        # paste-log / marker-open mirror state previously held directly on
+        # PersistentApp. Every state-mutating event flows through
+        # self._state.ingest() (or .log() for the legacy two-arg shape used
+        # by stream callbacks). snapshot() builds the widget /status payload.
+        self._state = SessionState(
+            timeline=self.timeline,
+            started_at=self._started_at,
+            device=device,
+            compute=compute,
         )
 
         # Optional per-chunk audio archiver. Subscribes to the fanout (same
@@ -251,7 +195,7 @@ class PersistentApp:
             beam_size=fast_cfg.fw.beam_size,
             condition_on_previous_text=fast_cfg.fw.condition_on_previous_text,
             window_q_maxsize=fast_cfg.window_q_maxsize,
-            debug_log=self._debug.log,
+            debug_log=self._state.log,
             on_segment=self._on_segment,
             on_silence_boundary=self._on_silence_boundary_fast,
         )
@@ -269,11 +213,7 @@ class PersistentApp:
         if CFG.persistent.hq.enabled:
             self._build_hq_stream()
 
-        # Status-widget state. paste_log is most-recent-first when serialized.
-        self._paste_log: deque = deque(maxlen=50)
-        self._marker_open_since: Optional[str] = None
-
-        self._kb = keyboard.Controller()
+        # Note: _paste_log and _marker_open_since now live inside SessionState.
 
         clipboard_types = [
             ClipboardWindowType(
@@ -293,25 +233,63 @@ class PersistentApp:
                 schedule_end_marker=False,
             ),
         ]
+        # ClipboardWindowManager used to emit press / cursor_capture /
+        # marker-drain derived events into the debug log; with R2 those
+        # events are no longer the source of truth (user_action is), so
+        # we pass a no-op debug_log. The clipboard manager still tracks
+        # its internal state and schedules timeline markers correctly;
+        # it just doesn't pollute the event stream with redundant rows.
         self.clipboard_mgr = ClipboardWindowManager(
             types=clipboard_types,
             timeline=self.timeline,
-            debug_log=self._debug.log,
+            debug_log=lambda kind, data: None,
             request_force_flush=self._request_force_flush_all,
             cursor_time_at=self._cursor_time_at,
         )
 
-        # Bare double-tap dispatcher. `e` is the "error" / debug-flag key:
-        # pressing it stamps a high-visibility event into the debug log
-        # (and the persisted debug_events.jsonl) so post-session replay
-        # can jump straight to "the moment something went wrong" instead
-        # of grepping through the full timeline.
-        keys = (
-            set(self._marker_keys)
-            | self.clipboard_mgr.keys()
-            | {"x", "q", "m", CFG.persistent.debug_flag_key}
+        # UserActionProducer owns pynput + double-tap detection +
+        # backspace-out + key-to-action resolution. Its one output is a
+        # ``user_action`` event per committed press: the third input
+        # stream alongside fast/hq segments. SessionState.ingest is the
+        # sole consumer — there is no longer a parallel ``_on_action``
+        # dispatch path. All state mutation flows through user_action.
+        self._user_actions = UserActionProducer(
+            marker_keys=set(self._marker_keys),
+            clipboard_keys=self.clipboard_mgr.keys(),
+            debug_flag_key=CFG.persistent.debug_flag_key,
+            cursor_time_at=self._cursor_time_at,
+            on_user_action=self._dispatch_user_action,
+            on_ack=self._ack,
+            stop_event=self._stop,
         )
-        self._dt = BareDoubleTap(window=1.0, keys=keys, on_double_tap=self._on_action)
+
+        # Wire SessionState's user_action dispatch to the live owners.
+        # The clipboard manager + audio fanout are mutated directly from
+        # SessionState._apply_user_action; the paste callback kicks off
+        # PasteExecutor consumes paste-output from SessionState when a
+        # clipboard window closes; the
+        # stream server broadcasts marker open/close over the WebSocket.
+        self._state.attach_live_components(
+            recorder=self.recorder,
+            audio_fanout=self.audio_fanout,
+            clipboard_mgr=self.clipboard_mgr,
+        )
+        self._state.attach_stream_server(self._stream_server)
+        self._state.attach_stop_event(self._stop)
+
+        # PasteExecutor consumes the paste-output side of SessionState.
+        # When a clipboard window closes (from a user_action(clipboard_toggle)
+        # ending an active window), SessionState fires this callback with
+        # the closed ClipboardWindow; PasteExecutor runs the drain → slice
+        # → emit-paste-event → OS-paste pipeline on its own daemon thread.
+        self._paste_executor = PasteExecutor(
+            timeline=self.timeline,
+            clipboard=self.clipboard,
+            log_event=self._state.log,
+            cursor_time_at=self._cursor_time_at,
+            on_done=lambda msg, style: self._done(msg, style=style),
+        )
+        self._state.attach_paste_callback(self._paste_executor.execute)
 
     def _request_force_flush_all(self) -> None:
         """Fire force-flush on every active transcription stream."""
@@ -319,60 +297,25 @@ class PersistentApp:
             s.request_force_flush()
 
     def _on_segment(self, stream_id: str, seg) -> None:
-        """Callback wired into every TranscriptionStream's drain loop.
-
-        Forwards the segment to the timeline (which routes it into the
-        per-stream buffer and re-renders canonical on demand) and, for the
-        fast stream only, broadcasts on the live transcript WebSocket.
+        """Live-only callback wired into every TranscriptionStream's drain
+        loop. The segment has *already* been logged as a "segment" event
+        via TranscriptionStream._emit_segment's ``_debug`` call (which
+        routes through SessionState.log → SessionState._apply →
+        timeline.ingest_segment), so we MUST NOT call ingest_segment
+        again here — doing so doubled every phrase in the canonical
+        render and the raw chunk files. This callback now only handles
+        the live-only side effect of broadcasting fast-stream segments
+        on the transcript WebSocket.
         """
-        try:
-            self.timeline.ingest_segment(
-                stream_id,
-                seg.text,
-                seg.start_time,
-                seg.end_time,
-                seg.words,
-            )
-        except Exception:
-            pass
         if stream_id == "fast":
             try:
                 self._stream_server.broadcast(seg.text, seg.end_time)
             except Exception:
                 pass
 
-    def _snapshot_writer_loop(self) -> None:
-        """Periodically write get_status_snapshot() to status_snapshots.jsonl
-        under the session dir so the full widget state can be replayed.
-
-        Trims ``debug_events`` to an empty list on the disk copy — the
-        ring-buffer events are already being persisted line-by-line in
-        ``debug_events.jsonl``; duplicating them in every snapshot would
-        bloat the file by O(snapshots × events) for no gain.
-        """
-        import json as _json
-        path = os.path.join(self.timeline.session_dir, "status_snapshots.jsonl")
-        try:
-            fh = open(path, "a", buffering=1, encoding="utf-8")
-        except OSError:
-            return
-        try:
-            interval = float(CFG.persistent.debug_snapshot_interval_s) or 2.0
-            while not self._stop.is_set():
-                try:
-                    snap = self.get_status_snapshot()
-                    snap_copy = dict(snap)
-                    snap_copy["debug_events"] = []  # see docstring
-                    fh.write(_json.dumps(snap_copy) + "\n")
-                except Exception:
-                    pass
-                if self._stop.wait(interval):
-                    break
-        finally:
-            try:
-                fh.close()
-            except Exception:
-                pass
+    # _snapshot_writer_loop removed: replay rebuilds widget state by
+    # re-running the event stream through SessionState.ingest, so a
+    # periodically-sampled snapshot file is redundant. See refactor plan.
 
     def _on_silence_boundary_fast(self) -> None:
         """Fast-aggregator silence-boundary tick. Drives canonical chunk
@@ -438,7 +381,7 @@ class PersistentApp:
             beam_size=hq_cfg.fw.beam_size,
             condition_on_previous_text=hq_cfg.fw.condition_on_previous_text,
             window_q_maxsize=hq_cfg.window_q_maxsize,
-            debug_log=self._debug.log,
+            debug_log=self._state.log,
             on_segment=self._on_segment,
         )
         self.streams.append(self.hq_stream)
@@ -618,206 +561,22 @@ class PersistentApp:
         """Print an immediate 'recognized' line — separate from execution."""
         self.console.print(f"[dim]› recognized: {command}[/dim]")
 
-    def _undo_keypresses(self, count: int = 2) -> None:
-        """Send N backspaces to undo the double-tap that just landed in
-        whichever app currently has keyboard focus. Best-effort — in most
-        non-text contexts backspace is a no-op."""
-        try:
-            for _ in range(count):
-                self._kb.tap(keyboard.Key.backspace)
-        except Exception:
-            pass
-
     def _done(self, message: str, style: str = "bold green") -> None:
         """Print an 'executed' line for a command's actual effect."""
         self.console.print(f"[{style}]✓ executed:[/{style}] {message}")
 
-    def _on_action(self, char: str) -> None:
-        # Immediately undo the two visible keystrokes in the focused app.
-        # Done before printing so the cleanup happens before any user-visible
-        # delay from the action itself.
-        self._undo_keypresses(2)
-        if char in self._marker_keys:
-            self._ack(f"marker `{char}`")
-            self._handle_marker(char)
-        elif char in self.clipboard_mgr.keys():
-            label = self.clipboard_mgr.type_for(char).label
-            phase = f"{label} end" if self.clipboard_mgr.is_active(char) else f"{label} start"
-            self._ack(phase)
-            self._toggle_clipboard_window(char)
-        elif char == "x":
-            self._ack("cancel (x)")
-            self._cancel_window()
-        elif char == "m":
-            self._ack("mute toggle (m)")
-            self._toggle_mute()
-        elif char == CFG.persistent.debug_flag_key:
-            self._ack(f"error flag ({char})")
-            self._flag_issue()
-        elif char == "q":
-            self._ack("quit (q)")
-            self._stop.set()
-            self._done("shutting down", style="bold yellow")
-
-    def _handle_marker(self, key: str) -> None:
-        events = self.timeline.insert_marker(key)
-        if not events:
-            return
-        audio_time = self.timeline.fast_high_watermark()
-        for action, type_name in events:
-            self._debug.log("marker", {
-                "type": type_name, "action": action, "key": key,
-            })
-            self._stream_server.broadcast_marker(action, type_name, audio_time)
-        for action, type_name in events:
-            if action == "flag":
-                self._done(f"flagged [magenta]{type_name}[/magenta]")
-                continue
-            verb = "opened" if action == "open" else "closed"
-            note = ""
-            if len(events) > 1 and action == "close":
-                # Cross-type switch — make the auto-close obvious.
-                note = " [dim](auto, switching type)[/dim]"
-            self._done(f"{verb} marker [magenta]{type_name}[/magenta]{note}")
-        # Update widget-visible "open since" timestamp.
-        with self._state_lock:
-            self._marker_open_since = (
-                datetime.now().strftime("%H:%M:%S")
-                if self.timeline.open_marker_type() is not None else None
-            )
-
-    def _toggle_clipboard_window(self, key: str) -> None:
-        result = self.clipboard_mgr.toggle(key)
-        if result.action == "start_blocked":
-            self._done(f"[yellow]{result.error_msg}[/yellow]", style="yellow")
-            return
-        if result.action == "started":
-            self._done(f"started {result.type_label} capture")
-            return
-        if result.action == "ended" and result.closed_window is not None:
-            threading.Thread(
-                target=self._finish_paste,
-                args=(result.closed_window,),
-                daemon=True,
-            ).start()
-
-    def _flag_issue(self) -> None:
-        """Stamp a high-visibility ``debug_flag`` event with the current
-        session time. Captured by the debug ring buffer (so the widget
-        timeline renders it immediately) and by ``debug_events.jsonl``
-        (so post-session replay can jump straight to it).
-
-        Useful workflow: when something feels off during a session — a
-        missed word, a botched paste, an HQ stream lag spike — double-tap
-        ``b`` to bookmark the exact moment. Then post-session you can
-        replay or grep the JSONL for ``"kind": "debug_flag"`` to land at
-        the right spot without combing through the whole timeline.
-        """
-        # Snapshot useful context so the flag is self-describing in JSONL.
-        try:
-            counters = {
-                s.label: {
-                    "accepted": s.windows_accepted_count,
-                    "dropped_queue_full": s.dropped_queue_full_count,
-                    "dropped_silent": s.dropped_silent_count,
-                }
-                for s in self.streams
-            }
-        except Exception:
-            counters = {}
-        try:
-            hq_edge = self.timeline.hq_high_watermark()
-            fast_edge = self.timeline.fast_high_watermark()
-        except Exception:
-            hq_edge = 0.0
-            fast_edge = 0.0
-        self._debug.log("debug_flag", {
-            "wall_clock": datetime.now().strftime("%H:%M:%S"),
-            "fast_watermark": round(fast_edge, 3),
-            "hq_watermark": round(hq_edge, 3),
-            "stream_stats": counters,
-            "capture_mode": (
-                "r" if self.clipboard_mgr.is_active("r") else
-                "aside" if self.clipboard_mgr.is_active("a") else
-                "passive"
-            ),
+    def _dispatch_user_action(
+        self, action: str, key: str, session_time: float
+    ) -> None:
+        """Forward a committed user_action from UserActionProducer into
+        SessionState. SessionState._apply_user_action does all the work
+        — mutates timeline / clipboard manager / audio fanout, fires the
+        paste callback. There is no separate per-action handler path."""
+        self._state.log("user_action", {
+            "action": action,
+            "key": key,
+            "session_time": round(float(session_time), 3),
         })
-        self._done("flagged this moment for debug — see debug_events.jsonl",
-                   style="bold magenta")
-
-    def _toggle_mute(self) -> None:
-        now_muted = self.audio_fanout.toggle_muted()
-        if now_muted:
-            self._debug.log("mute", {"state": "on"})
-            self._done("muted — transcription paused", style="bold yellow")
-        else:
-            self._debug.log("mute", {"state": "off"})
-            self._done("unmuted — transcription resumed")
-
-    def _cancel_window(self) -> None:
-        result = self.clipboard_mgr.cancel()
-        if result.nothing:
-            self._done("nothing to cancel", style="dim")
-            return
-        if result.resumed_labels:
-            suffix = f" ({', '.join(result.resumed_labels)} resumed)"
-        else:
-            suffix = ""
-        self._done(f"{result.cancelled_label} cancelled{suffix}")
-
-    def _finish_paste(self, window: ClipboardWindow) -> None:
-        # Wait for the transcriber to drain past the end-press timestamp.
-        wait_started = time.monotonic()
-        deadline = window.end_press_time + PASTE_DRAIN_TIMEOUT
-        target = self._cursor_time_at(window.end_press_time)
-        timed_out = True
-        while time.monotonic() < deadline:
-            if self.timeline.latest_segment_end() >= target:
-                timed_out = False
-                break
-            time.sleep(0.1)
-        drain_wait_ms = int((time.monotonic() - wait_started) * 1000)
-        # Materialize any pending markers (notably the recording-end token
-        # for THIS press) by re-anchoring them to the current fast
-        # watermark, so they surface in the canonical render BEFORE we
-        # slice for paste. Otherwise the end marker would only appear once
-        # later audio crosses the press time — by then the slice is gone.
-        drained = self.timeline.flush_pending_markers()
-        if drained:
-            self._debug.log("marker", {
-                "type": "recording", "action": "drained_pending",
-                "key": "-", "count": drained,
-            })
-        # Close the live span at the current cursor (in canonical render)
-        # and paste.
-        window.close(self.timeline.cursor())
-        text = window.text(self.timeline).strip()
-        self._debug.log("paste", {
-            "label": window.label,
-            "start_press_time": round(window.start_press_time, 3),
-            "end_press_time": round(self._cursor_time_at(window.end_press_time), 3),
-            "spans": [list(s) for s in window.spans],
-            "drain_wait_ms": drain_wait_ms,
-            "timed_out": timed_out,
-            "char_count": len(text),
-            "preview": text[:200],
-        })
-        if not text:
-            self._done(f"{window.label} → nothing to paste", style="yellow")
-            return
-        self.clipboard.copy_and_paste(text)
-        preview = text[:80] + ("..." if len(text) > 80 else "")
-        self._done(f"{window.label} pasted → [green]{preview}[/green]")
-        # Record for the widget paste log (chronological — newest last so the
-        # UI can simply scroll to the bottom to show the tail).
-        entry = {
-            "ts": datetime.now().strftime("%H:%M:%S"),
-            "label": window.label,
-            "preview": text[:120] + ("…" if len(text) > 120 else ""),
-            "full": text,
-        }
-        with self._state_lock:
-            self._paste_log.append(entry)
 
     def _cursor_time_at(self, monotonic_ts: float) -> float:
         """Estimate the session-relative time corresponding to a wall-clock press."""
@@ -833,24 +592,16 @@ class PersistentApp:
         self.recorder.start()
         # Anchor debug timestamps to the same monotonic origin the recorder
         # uses, so all event ts values are session-relative seconds.
-        self._debug.bind_origin(self.recorder.started_monotonic or time.monotonic())
-        # Optional post-session replay persistence: write debug events as
-        # they arrive to a JSONL under the session dir, plus periodic
-        # status snapshots. Together these are enough to replay everything
-        # the live widget showed.
-        self._snapshot_thread: Optional[threading.Thread] = None
+        self._state.bind_origin(self.recorder.started_monotonic or time.monotonic())
+        # Per-stream JSONL persistence: every event is appended to one of
+        # stream_fast / stream_hq / stream_user / stream_observability under
+        # the session dir. Replay merges these by (ts, seq) and feeds them
+        # back through SessionState to rebuild the widget state — so we
+        # don't need a separate periodic status_snapshots.jsonl any more.
         if CFG.persistent.debug_recording:
-            evt_path = os.path.join(self.timeline.session_dir, "debug_events.jsonl")
-            self._debug.set_output_path(evt_path)
-            self._snapshot_thread = threading.Thread(
-                target=self._snapshot_writer_loop,
-                name="SnapshotWriter",
-                daemon=True,
-            )
-            self._snapshot_thread.start()
+            self._state.set_output_dir(self.timeline.session_dir)
             self.console.print(
-                f"[dim]🎬 debug recording → debug_events.jsonl, "
-                f"status_snapshots.jsonl[/dim]"
+                f"[dim]🎬 debug recording → stream_fast/hq/user/observability.jsonl[/dim]"
             )
         self.audio_fanout.start()
         if self._audio_archiver is not None:
@@ -937,21 +688,21 @@ class PersistentApp:
                 self.console.print(f"[yellow]Widget failed to start: {e}[/yellow]")
                 self._widget = None
 
-        listener = keyboard.Listener(on_press=self._on_press)
-        listener.start()
+        self._user_actions.start()
         try:
             while not self._stop.is_set():
                 time.sleep(0.2)
         except KeyboardInterrupt:
             self._stop.set()
-        listener.stop()
+        self._user_actions.stop()
         self._shutdown()
 
     def get_status_snapshot(self) -> dict:
-        """Return the JSON payload served by the widget's /status endpoint."""
-        with self._state_lock:
-            paste_log = list(self._paste_log)
-            marker_open_since = self._marker_open_since
+        """Return the JSON payload served by the widget's /status endpoint.
+
+        Just refreshes the two live-only counters (per-stream drop stats
+        and hq-active flag) and asks SessionState to build the payload.
+        Component attachments happen once at __init__."""
         stream_stats = {
             s.label: {
                 "accepted": s.windows_accepted_count,
@@ -960,26 +711,9 @@ class PersistentApp:
             }
             for s in self.streams
         }
-        return build_status(
-            timeline=self.timeline,
-            hq_active=self.hq_stream is not None,
-            device=self._device,
-            compute=self._compute,
-            started_at=self._started_at,
-            audio_fanout=self.audio_fanout,
-            clipboard_mgr=self.clipboard_mgr,
-            paste_log=paste_log,
-            marker_open_since=marker_open_since,
-            recorder=self.recorder,
-            debug=self._debug,
-            stream_stats=stream_stats,
-        )
-
-    def _on_press(self, key) -> None:
-        try:
-            self._dt.feed(key_char(key))
-        except Exception:
-            pass
+        self._state.set_stream_stats(stream_stats)
+        self._state.set_hq_active(self.hq_stream is not None)
+        return self._state.snapshot()
 
     def _shutdown(self) -> None:
         self.console.print("\n[bold yellow]Shutting down — flushing...[/bold yellow]")
@@ -1014,7 +748,7 @@ class PersistentApp:
             self.console.print("[dim]💾 final transcript → transcript_final.txt[/dim]")
         # Close debug-recording JSONL handles cleanly so files end with
         # a newline-terminated last record.
-        self._debug.close_output()
+        self._state.close_output()
         self.console.print(
             f"[bold green]✓ Session saved:[/bold green] {self.timeline.session_dir}"
         )

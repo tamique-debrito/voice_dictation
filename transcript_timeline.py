@@ -247,18 +247,37 @@ class TranscriptTimeline:
             if words:
                 cursor = seg_offset
                 for w in words:
-                    wt = (w.text if hasattr(w, "text") else w.get("text", "")).strip()
+                    # Two shapes of word records flow through here:
+                    #   - In-memory Word objects from faster-whisper, exposing
+                    #     ``.text`` / ``.start_time`` / ``.end_time`` attrs.
+                    #   - On-disk dicts from recorded JSONL streams using the
+                    #     short keys ``"s"`` / ``"e"`` (plus ``"text"``) — the
+                    #     format ``transcription_stream`` serializes for the
+                    #     debug event log. Replay feeds these back through
+                    #     this path, so we accept both shapes transparently.
+                    if hasattr(w, "text"):
+                        wt = (w.text or "").strip()
+                        w_start = float(w.start_time)
+                        w_end = float(w.end_time)
+                    else:
+                        wt = (w.get("text", "") or "").strip()
+                        # Long keys win when present (back-compat); fall back
+                        # to the short serialized keys for recorded events.
+                        if "start_time" in w:
+                            w_start = float(w["start_time"])
+                        else:
+                            w_start = float(w.get("s", 0.0))
+                        if "end_time" in w:
+                            w_end = float(w["end_time"])
+                        else:
+                            w_end = float(w.get("e", 0.0))
                     if not wt:
                         continue
                     rel = text.find(wt, cursor - seg_offset)
                     if rel < 0:
                         rel = cursor - seg_offset
                     abs_off = seg_offset + rel
-                    state.word_index.append((
-                        abs_off,
-                        float(w.start_time if hasattr(w, "start_time") else w["start_time"]),
-                        float(w.end_time if hasattr(w, "end_time") else w["end_time"]),
-                    ))
+                    state.word_index.append((abs_off, w_start, w_end))
                     cursor = abs_off + len(wt)
             if state.raw_chunk_writer is not None:
                 state.raw_chunk_writer.append(text)

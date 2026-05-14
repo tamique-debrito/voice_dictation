@@ -1323,6 +1323,25 @@ _INDEX_HTML = """<!doctype html>
     return null;
   }
 
+  function findSegmentAt(chunk, t) {
+    // chunk.segments is the list of contiguous wav spans. If empty (older
+    // silence-padded manifest), we synthesize a single segment spanning
+    // the whole chunk so the linear-mapping fallback works.
+    const segs = (chunk.segments && chunk.segments.length)
+      ? chunk.segments
+      : [{
+          wav_offset_s: 0,
+          t_start: chunk.t_start,
+          t_end: chunk.t_end,
+          duration_s: chunk.duration_s,
+        }];
+    for (const seg of segs) {
+      if (t >= seg.t_start && t <= seg.t_end) return seg;
+      if (seg.t_start > t) return null;
+    }
+    return null;
+  }
+
   function syncReplayAudio(s) {
     if (!audioEl) return;
     const replay = s.replay;
@@ -1342,8 +1361,19 @@ _INDEX_HTML = """<!doctype html>
     const speed = Number(replay.speed || 1.0);
 
     if (chunk === null) {
-      // Between chunks — silence period. Pause but keep src loaded.
-      audioStatus.textContent = 'silence';
+      audioStatus.textContent = 'silence (between chunks)';
+      if (!audioEl.paused) {
+        audioEl.dataset.programmaticPause = '1';
+        audioEl.pause();
+      }
+      return;
+    }
+
+    const seg = findSegmentAt(chunk, now);
+    if (seg === null) {
+      // Inside a chunk but in a gap between captured segments (mute /
+      // dropout interval). Pause until the next segment starts.
+      audioStatus.textContent = 'chunk ' + chunk.idx + ' (gap)';
       if (!audioEl.paused) {
         audioEl.dataset.programmaticPause = '1';
         audioEl.pause();
@@ -1352,30 +1382,32 @@ _INDEX_HTML = """<!doctype html>
     }
 
     const targetSrc = '/audio/' + chunk.idx;
+    const expected = seg.wav_offset_s + Math.max(0, now - seg.t_start);
+
     if (currentAudioChunkIdx !== chunk.idx) {
-      // Load new chunk. Setting .src triggers reload; once metadata is
-      // ready we seek and play.
       currentAudioChunkIdx = chunk.idx;
       audioEl.src = targetSrc;
       audioEl.playbackRate = Math.max(0.0625, Math.min(16, speed));
-      audioStatus.textContent = 'chunk ' + chunk.idx;
+      audioStatus.textContent = 'chunk ' + chunk.idx + ' seg @ '
+        + expected.toFixed(1) + 's';
       const onReady = () => {
         audioEl.removeEventListener('loadedmetadata', onReady);
-        const pos = Math.max(0, now - chunk.t_start);
-        try { audioEl.currentTime = pos; } catch (e) { /* not seekable yet */ }
+        try { audioEl.currentTime = expected; } catch (e) { /* not seekable yet */ }
         if (!userPaused) {
-          audioEl.play().catch(() => { /* autoplay blocked — user must click ▶ */ });
+          audioEl.play().catch(() => { /* autoplay blocked */ });
         }
       };
       audioEl.addEventListener('loadedmetadata', onReady);
       return;
     }
 
-    // Same chunk as last tick — keep playing, just nudge rate and check drift.
+    // Same chunk. Check if we've drifted (or just crossed a segment
+    // boundary — the wav plays straight through into the next segment's
+    // audio, but the timeline says we should be in a gap or at a
+    // different offset). Re-seek if the gap exceeds the drift tolerance.
     if (Math.abs(audioEl.playbackRate - speed) > 0.001) {
       audioEl.playbackRate = Math.max(0.0625, Math.min(16, speed));
     }
-    const expected = Math.max(0, now - chunk.t_start);
     if (!isNaN(audioEl.currentTime) && Math.abs(audioEl.currentTime - expected) > 0.4) {
       try { audioEl.currentTime = expected; } catch (e) { /* ignore */ }
     }
@@ -1383,7 +1415,7 @@ _INDEX_HTML = """<!doctype html>
       audioEl.play().catch(() => {});
     }
     audioStatus.textContent = 'chunk ' + chunk.idx
-      + ' @ ' + expected.toFixed(1) + 's / ' + chunk.duration_s.toFixed(1) + 's';
+      + ' seg @ ' + expected.toFixed(1) + 's / ' + chunk.duration_s.toFixed(1) + 's';
   }
 
   // Track when we last got a successful snapshot. The staleness chip is

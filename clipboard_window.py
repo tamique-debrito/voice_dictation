@@ -54,11 +54,31 @@ class ClipboardWindow:
     def text(self, timeline) -> str:
         """Render the paste text for this window by slicing the timeline's
         canonical render at each span's cursor bounds, with word-level
-        press-time trimming on the first/last span."""
+        press-time trimming on the first/last span.
+
+        The first span's start cursor is resolved against the *current*
+        canonical render using ``start_press_time`` as the audio anchor.
+        This is critical: if we captured a cursor offset at press time
+        (when the fast watermark first crossed start_press_time) and HQ
+        later substituted its own text for the same audio range, the
+        canonical render rearranges underneath the saved offset, and a
+        cursor that was originally "just after the last word before the
+        press" lands deep inside the first post-press word in the new
+        render. Resolving fresh against the current render is the only
+        way to keep the slice start at the right audio-time boundary
+        regardless of fast-vs-HQ re-renders between press and paste.
+        Park/resume cursors (intermediate spans) are still captured at
+        live time — they're rarer and re-rendering doesn't affect them
+        the same way."""
         parts: list[str] = []
         for i, (s, e) in enumerate(self.spans):
             if s is None:
-                s = timeline.cursor()
+                if i == 0:
+                    s = timeline.find_offset_for_time(
+                        self.start_press_time, "before"
+                    )
+                else:
+                    s = timeline.cursor()
                 self.spans[i] = (s, e)
             sp = self.start_press_time if i == 0 else None
             ep = self.end_press_time if i == len(self.spans) - 1 else None
@@ -154,15 +174,28 @@ class ClipboardWindowManager:
     # ------------------------------------------------------------------
 
     def toggle(self, key: str) -> ToggleResult:
+        """Live entry point — captures session time from monotonic clock."""
+        press_ts = time.monotonic()
+        return self.toggle_at(key, press_ts, self._cursor_time_at(press_ts))
+
+    def toggle_at(
+        self, key: str, press_ts: float, session_time: float,
+    ) -> ToggleResult:
+        """Replay-friendly entry point. Caller provides the session time
+        explicitly (so recorded events can replay the original moment
+        rather than relying on the live clock)."""
         cfg = self._types.get(key)
         if cfg is None:
             return ToggleResult(action="noop")
         with self._lock:
             if cfg.key in self._active:
-                return self._end_locked(cfg)
-            return self._start_locked(cfg)
+                return self._end_locked(cfg, press_ts, session_time)
+            return self._start_locked(cfg, press_ts, session_time)
 
-    def _start_locked(self, cfg: ClipboardWindowType) -> ToggleResult:
+    def _start_locked(
+        self, cfg: ClipboardWindowType,
+        press_ts: float, press_session: float,
+    ) -> ToggleResult:
         # A parker is exclusive while open: refuse to start a parkable window
         # while one is active (matches original "aside is active; close it
         # with `a` first" behavior).
@@ -178,8 +211,6 @@ class ClipboardWindowManager:
                         ),
                     )
 
-        press_ts = time.monotonic()
-        press_session = self._cursor_time_at(press_ts)
         # Drain any markers still pending from a prior window (most commonly
         # the end marker for a fast end-then-start sequence whose paste-
         # finish drain hasn't fired yet). Without this, the new start token
@@ -215,19 +246,14 @@ class ClipboardWindowManager:
         )
         self._active[cfg.key] = window
 
-        requested = time.monotonic()
-
-        def _set_cursor(cursor: int, _w=window, _req=requested,
-                        _pt=press_session, _label=cfg.label) -> None:
-            _w.set_start_cursor(cursor)
-            self._debug("cursor_capture", {
-                "label": _label,
-                "press_time": round(_pt, 3),
-                "fired_latency_ms": int((time.monotonic() - _req) * 1000),
-                "cursor": cursor,
-            })
-
-        self._timeline.schedule_cursor_capture(press_session, _set_cursor)
+        # The first span's start cursor is intentionally NOT captured here.
+        # It's resolved at paste-time against the canonical render using
+        # ``start_press_time`` as the audio anchor — see
+        # ``ClipboardWindow.text`` for the reasoning. Capturing now (the
+        # moment the fast watermark crossed ``press_session``) was the old
+        # behavior and produced stale offsets once HQ substituted its
+        # transcription for the same audio range, leading to words at the
+        # start of a window being dropped from the paste.
         self._debug("press", {
             "key": cfg.key,
             "phase": "start",
@@ -235,9 +261,10 @@ class ClipboardWindowManager:
         })
         return ToggleResult(action="started", type_label=cfg.label)
 
-    def _end_locked(self, cfg: ClipboardWindowType) -> ToggleResult:
-        press_ts = time.monotonic()
-        press_session = self._cursor_time_at(press_ts)
+    def _end_locked(
+        self, cfg: ClipboardWindowType,
+        press_ts: float, press_session: float,
+    ) -> ToggleResult:
         # Force the aggregator to flush its in-progress audio so trailing
         # words reach the transcriber inside the paste-drain budget instead
         # of waiting for VAD silence.
@@ -272,6 +299,12 @@ class ClipboardWindowManager:
         """Cancel the topmost active window: parker first (aside), then
         parkable (r). Scrubs the start marker and resumes any parked
         windows that should now be live again."""
+        return self.cancel_at()
+
+    def cancel_at(self) -> CancelResult:
+        """Replay-friendly entry point — currently identical to ``cancel``
+        since the cancel path doesn't depend on press timing. Kept as a
+        sibling of ``toggle_at`` for API symmetry."""
         with self._lock:
             if not self._active:
                 return CancelResult(nothing=True)
