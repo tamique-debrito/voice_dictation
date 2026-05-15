@@ -832,7 +832,17 @@ function renderTranscript(transcript) {
     return;
   }
   const minMs = segs[0].start_accepted_ms;
-  const maxMs = segs[segs.length - 1].end_accepted_ms;
+  // Upper bound for marker rendering: prefer the manager's "processed up
+  // to here" watermark over the last segment's end. The press timestamp
+  // for a close-recording action lands at the current accepted_ms cursor,
+  // which can sit a few frames past the last admitted VAD frame — so
+  // using last-segment-end as the bound would briefly hide the end
+  // marker until more audio extends the segment-end horizon.
+  const segMaxMs = segs[segs.length - 1].end_accepted_ms;
+  const maxMs = Math.max(
+    segMaxMs,
+    transcript.processed_up_to_accepted_ms || 0,
+  );
   const hqUpTo = transcript.hq_covered_end_accepted_ms;
 
   // Collect user-action markers in [minMs, maxMs] from the live event stream.

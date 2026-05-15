@@ -185,5 +185,86 @@ class TestSegmentEmission(unittest.TestCase):
         bus.shutdown()
 
 
+class TestMuteGate(unittest.TestCase):
+    def test_muted_chunks_drop_audio_freeze_accepted_advance_real(self):
+        # 10 voiced frames while unmuted, then mute, then 10 more voiced
+        # while muted, then unmute and 10 more voiced. Expected:
+        #   - segments only from the unmuted spans
+        #   - accepted_ms frozen across the muted span
+        #   - real_ms_processed advances throughout
+        pp, sink, bus = _build_preprocessor([True] * 30)
+        _feed(pp, 10)
+        accepted_before_mute = pp.now_accepted_ms()
+        real_before_mute = pp._real_ms_processed
+        self.assertGreater(accepted_before_mute, 0)
+
+        pp.set_muted(True)
+        _feed(pp, 10)
+        self.assertEqual(pp.now_accepted_ms(), accepted_before_mute)
+        self.assertEqual(
+            pp._real_ms_processed, real_before_mute + 10 * VAD_FRAME_MS
+        )
+
+        pp.set_muted(False)
+        _feed(pp, 10)
+        self.assertGreater(pp.now_accepted_ms(), accepted_before_mute)
+        # All PCM emitted must come from the two unmuted spans only.
+        total_admitted_frames = sum(
+            len(s.pcm) // SUB_FRAME_BYTES for s in sink.segments
+        )
+        # Pre-mute span: 9 admits (first frame drops by warmup).
+        # Post-mute span: gate was reseeded all-silence; same warmup → 9 admits.
+        self.assertEqual(total_admitted_frames, 18)
+        bus.shutdown()
+
+    def test_mute_toggle_action_drives_mute_state(self):
+        # Real EventBus subscription path: publish mute_toggle and assert
+        # the preprocessor flips _muted.
+        from voice_dictation.event_bus import EventBus
+        from voice_dictation.types import TOPIC_USER_ACTIONS
+        from voice_dictation.clock import next_seq
+
+        audio_cfg = AudioCaptureConfig()
+        pp_cfg = PreprocessorConfig(
+            voiced_gate_frames=5,
+            voiced_gate_min_voiced=2,
+            silence_boundary_ms=100,
+        )
+        bus = EventBus()
+        stop = threading.Event()
+        pp = AudioPreprocessor(pp_cfg, audio_cfg, bus, stop)
+        try:
+            pp.start()
+            self.assertFalse(pp._muted)
+            bus.publish(Event(
+                topic=TOPIC_USER_ACTIONS,
+                emit_accepted_ms=0,
+                seq=next_seq(),
+                payload={"action": "mute_toggle"},
+            ))
+            # Bus delivers on a worker thread — poll briefly.
+            import time
+            for _ in range(50):
+                if pp._muted:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(pp._muted)
+            bus.publish(Event(
+                topic=TOPIC_USER_ACTIONS,
+                emit_accepted_ms=0,
+                seq=next_seq(),
+                payload={"action": "mute_toggle"},
+            ))
+            for _ in range(50):
+                if not pp._muted:
+                    break
+                time.sleep(0.01)
+            self.assertFalse(pp._muted)
+        finally:
+            stop.set()
+            pp.shutdown()
+            bus.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

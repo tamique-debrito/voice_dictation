@@ -456,9 +456,20 @@ class TranscriptStreamManager:
         pieces.reverse()
 
         hq_covered_end = max((b for _, b in hq_ranges), default=0)
+        with self._wm_lock:
+            processed_up_to = max(self._fast_up_to, self._hq_up_to)
         return {
             "segments": pieces,
             "hq_covered_end_accepted_ms": hq_covered_end,
+            # Authoritative "audio processed up to here" — same watermark
+            # that gates paste firing. The UI uses this as the upper bound
+            # for rendering markers/cursors so that a recording-end marker
+            # whose timestamp lands just past the last segment's content_end
+            # (very common — the press is stamped at the current accepted_ms
+            # cursor, which can be a few frames past the last admitted VAD
+            # frame) is visible immediately on close instead of waiting for
+            # more segments to extend the segment-end horizon.
+            "processed_up_to_accepted_ms": processed_up_to,
             "total_chars": sum(len(p["text"]) + 1 for p in pieces),
         }
 
