@@ -185,8 +185,13 @@ class UserActionManager:
             return
         accepted_ms = self._preprocessor.stamp_accepted_ms(real_ms)
         press_idx = next(self._press_seq)
+        # Both clipboard-close and aside-close presses end a paste window
+        # (recording or aside). The audio windower flushes on this flag,
+        # which lets the matching `paste_window_complete` / `aside_ended`
+        # action complete promptly instead of waiting for more audio.
         is_clipboard_end = (
-            action == "clipboard_toggle" and self._open_recording is not None
+            (action == "clipboard_toggle" and self._open_recording is not None)
+            or (action == "aside_toggle" and self._open_aside is not None)
         )
         # Publish the committed press.
         self._bus.publish(Event(
