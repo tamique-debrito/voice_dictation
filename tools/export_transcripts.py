@@ -163,7 +163,20 @@ def render_transcript(
     return "\n".join(out_lines).rstrip() + "\n"
 
 
-def render_header(meta: SessionMeta, exported_at: datetime) -> str:
+def render_header(
+    meta: SessionMeta, exported_at: datetime, *, full: bool = False,
+) -> str:
+    """Build the file header.
+
+    Default (``full=False``) is minimal — just the recorded time. The
+    rich metadata confuses LLMs into thinking it's content (e.g. the
+    word "regenerated" in the header gets picked up as a topic). Use
+    ``--full-header`` to opt back in for human-review exports.
+    """
+    if not full:
+        if meta.recorded_at:
+            return f"recorded: {meta.recorded_at.isoformat()}\n\n"
+        return "recorded: (unknown)\n\n"
     lines = [f"# {meta.name}"]
     if meta.recorded_at:
         lines.append(f"recorded: {meta.recorded_at.isoformat()}")
@@ -183,12 +196,13 @@ def render_header(meta: SessionMeta, exported_at: datetime) -> str:
 
 def export_session(
     meta: SessionMeta, out_dir: Path, exported_at: datetime,
+    *, full_header: bool = False,
 ) -> tuple[Path, int]:
     """Write ``<out_dir>/<session_name>.txt`` and return (path, line_count)."""
     chunks = load_chunks(meta.path)
     resolved = AnnotationStore(meta.path).resolved_state()
     body = render_transcript(chunks, resolved)
-    text = render_header(meta, exported_at) + body
+    text = render_header(meta, exported_at, full=full_header) + body
     out_path = out_dir / f"{meta.name}.txt"
     out_path.write_text(text, encoding="utf-8")
     line_count = sum(1 for line in body.splitlines() if line.strip())
@@ -197,22 +211,24 @@ def export_session(
 
 def export_combined(
     metas: list[SessionMeta], out_path: Path, exported_at: datetime,
+    *, full_header: bool = False,
 ) -> int:
     """Write a single file with all sessions concatenated, separated by
     a header per session. Returns the total non-blank line count."""
     parts: list[str] = []
-    parts.append(
-        f"# Combined transcript export\n"
-        f"sessions: {len(metas)}\n"
-        f"exported_at: {exported_at.isoformat()}\n\n"
-    )
+    if full_header:
+        parts.append(
+            f"# Combined transcript export\n"
+            f"sessions: {len(metas)}\n"
+            f"exported_at: {exported_at.isoformat()}\n\n"
+        )
     total_lines = 0
     for meta in metas:
         chunks = load_chunks(meta.path)
         resolved = AnnotationStore(meta.path).resolved_state()
         body = render_transcript(chunks, resolved)
         parts.append("=" * 78 + "\n")
-        parts.append(render_header(meta, exported_at))
+        parts.append(render_header(meta, exported_at, full=full_header))
         parts.append(body)
         parts.append("\n")
         total_lines += sum(1 for line in body.splitlines() if line.strip())
@@ -245,6 +261,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="write a single combined.txt instead of one file per session")
     p.add_argument("--combined-name", default="combined.txt",
                    help="filename for --combined output (default combined.txt)")
+    p.add_argument("--full-header", action="store_true",
+                   help="include rich metadata header (name, source, exported_at, "
+                        "etc). Default header is minimal: just `recorded:` — that "
+                        "avoids confusing downstream LLMs which otherwise pick up "
+                        "metadata as content.")
     args = p.parse_args(argv)
 
     candidate_dirs: list[Path] = []
@@ -287,12 +308,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     exported_at = datetime.now(tz=timezone.utc)
     if args.combined:
         out_path = args.out / args.combined_name
-        total = export_combined(metas, out_path, exported_at)
+        total = export_combined(
+            metas, out_path, exported_at, full_header=args.full_header,
+        )
         print(f"wrote {out_path} ({len(metas)} sessions, {total} lines)")
     else:
         results = []
         for m in metas:
-            path, n = export_session(m, args.out, exported_at)
+            path, n = export_session(
+                m, args.out, exported_at, full_header=args.full_header,
+            )
             results.append((path, n))
             print(f"wrote {path} ({n} lines)")
         print(f"total: {len(results)} sessions")
