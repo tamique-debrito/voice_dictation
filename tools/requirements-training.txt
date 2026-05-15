@@ -1,0 +1,20 @@
+# Training-only requirements. Kept out of the runtime dependencies so the
+# live dictation app stays lean. Install with:
+#
+#   pip install -r voice_dictation/tools/requirements-training.txt
+#
+# torch is pinned to a version with stable MPS support. soundfile pulls in
+# libsndfile via system; on macOS install with `brew install libsndfile`.
+
+torch>=2.2
+transformers>=4.40
+peft>=0.10
+datasets>=2.19
+evaluate>=0.4
+jiwer>=3.0
+accelerate>=0.30
+soundfile>=0.12
+
+# Optional: required only for Phase E (CT2 conversion). Installing this
+# pulls a fairly hefty native dep — keep separate if you're just training.
+ctranslate2>=4.0
