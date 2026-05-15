@@ -39,9 +39,21 @@ Inclusion modes (``--mode``):
 Length filter (``--min-s`` / ``--max-s``) drops chunks outside the
 Whisper-recommended 1–30s range by default.
 
+Discovery:
+    Inputs can be individual session directories OR parent directories.
+    A parent dir (e.g. ``transcripts/``) is expanded to its immediate
+    children that look like session dirs — i.e. contain
+    ``stream_fast.jsonl``, ``stream_hq.jsonl``, or ``audio/manifest.jsonl``.
+    Older sessions with only ``debug_events.jsonl`` (pre-refactor format)
+    are skipped — this builder requires the per-stream JSONL files.
+
 Usage:
-    python tools/build_dataset.py <session_dir> [<session_dir> ...] \\
-        --out <out_dir> [--mode overlay|strict|hybrid] \\
+    # Inventory: see what's annotated and what would be usable.
+    python tools/build_dataset.py transcripts/ --list [--mode overlay|strict|hybrid]
+
+    # Build: writes train.jsonl + validation.jsonl into <out_dir>.
+    python tools/build_dataset.py transcripts/ --out <out_dir> \\
+        [--mode overlay|strict|hybrid] \\
         [--val-fraction 0.1] [--seed 42] [--min-s 1.0] [--max-s 30.0]
 """
 
@@ -170,8 +182,209 @@ def _build_row_for_chunk(
     return " ".join(parts)
 
 
-def _session_rows(session_dir: str, mode: str, min_s: float, max_s: float) -> list[dict]:
-    """Returns one ``{audio, text, session, chunk_idx}`` row per included chunk."""
+# ---------------------------------------------------------------------------
+# Discovery + capability probe
+# ---------------------------------------------------------------------------
+
+def _looks_like_session_dir(path: str) -> bool:
+    """A session dir is something containing per-stream JSONL or an audio
+    manifest. Older sessions may have only ``debug_events.jsonl`` —
+    those are legacy and not usable by this dataset builder."""
+    if not os.path.isdir(path):
+        return False
+    for name in ("stream_fast.jsonl", "stream_hq.jsonl"):
+        if os.path.isfile(os.path.join(path, name)):
+            return True
+    if os.path.isfile(os.path.join(path, "audio", "manifest.jsonl")):
+        return True
+    return False
+
+
+def _discover_sessions(paths: list[str]) -> list[str]:
+    """Expand each input path:
+
+    - If it's already a session dir, take it as-is.
+    - If it's a directory whose immediate children include any session
+      dirs, take all those children (one level of recursion).
+    - Otherwise drop it with a warning.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        p_abs = os.path.abspath(p)
+        if p_abs in seen:
+            continue
+        if _looks_like_session_dir(p_abs):
+            out.append(p_abs)
+            seen.add(p_abs)
+            continue
+        if os.path.isdir(p_abs):
+            for entry in sorted(os.listdir(p_abs)):
+                sub = os.path.join(p_abs, entry)
+                if sub in seen:
+                    continue
+                if _looks_like_session_dir(sub):
+                    out.append(sub)
+                    seen.add(sub)
+            continue
+        print(f"warn: not a session or parent dir, skipping: {p}", file=sys.stderr)
+    return out
+
+
+def _probe_session(session_dir: str) -> dict:
+    """Cheap inventory of one session — what it has, how annotated it is,
+    why it would be skipped (if so). Used by ``--list``."""
+    info: dict = {
+        "session": os.path.basename(os.path.normpath(session_dir)),
+        "path": session_dir,
+        "has_audio_manifest": False,
+        "wav_count": 0,
+        "has_fast_segments": False,
+        "has_hq_segments": False,
+        "primary_stream": None,
+        "primary_segments": 0,
+        "annotations_exist": False,
+        "annotated_segments": 0,
+        "rejected_chunks": 0,
+        "chunks_in_manifest": 0,
+        "fully_annotated_chunks": 0,
+        "partially_annotated_chunks": 0,
+        "untouched_chunks": 0,
+        "reason": None,
+    }
+
+    audio_dir = os.path.join(session_dir, "audio")
+    manifest_path = os.path.join(audio_dir, "manifest.jsonl")
+    manifest = _read_jsonl(manifest_path)
+    if manifest:
+        info["has_audio_manifest"] = True
+        info["chunks_in_manifest"] = len(manifest)
+        info["wav_count"] = sum(
+            1 for r in manifest
+            if os.path.isfile(os.path.join(audio_dir, f"chunk_{int(r['idx']):03d}.wav"))
+        )
+        durations = [float(r.get("duration_s", 0.0)) for r in manifest]
+        if durations:
+            info["shortest_chunk_s"] = min(durations)
+            info["longest_chunk_s"] = max(durations)
+
+    hq = _load_segments(session_dir, "hq")
+    fast = _load_segments(session_dir, "fast")
+    info["has_hq_segments"] = bool(hq)
+    info["has_fast_segments"] = bool(fast)
+    primary = hq if hq else fast
+    info["primary_stream"] = "hq" if hq else ("fast" if fast else None)
+    info["primary_segments"] = len(primary)
+
+    ann_path = os.path.join(session_dir, "annotations.jsonl")
+    info["annotations_exist"] = os.path.isfile(ann_path)
+    seg_ann, chunk_ann = _load_annotation_state(session_dir)
+    info["annotated_segments"] = len(seg_ann)
+    info["rejected_chunks"] = sum(
+        1 for v in chunk_ann.values() if v.get("status") == "rejected"
+    )
+
+    # Per-chunk annotation coverage.
+    if info["has_audio_manifest"] and primary:
+        chunks_list = [
+            {"idx": int(r["idx"]), "t_start": float(r.get("t_start", 0.0)),
+             "t_end": float(r.get("t_end", 0.0))}
+            for r in manifest
+        ]
+        by_chunk = _assign_segments_to_chunks(chunks_list, primary)
+        for c in chunks_list:
+            cidx = c["idx"]
+            segs = by_chunk.get(cidx, [])
+            if not segs:
+                info["untouched_chunks"] += 1
+                continue
+            n_ann = sum(1 for s in segs if (cidx, s["segment_idx"]) in seg_ann)
+            if n_ann == 0:
+                info["untouched_chunks"] += 1
+            elif n_ann < len(segs):
+                info["partially_annotated_chunks"] += 1
+            else:
+                info["fully_annotated_chunks"] += 1
+
+    if not info["has_audio_manifest"]:
+        info["reason"] = "no audio/manifest.jsonl (record with --save-audio)"
+    elif info["wav_count"] == 0:
+        info["reason"] = "manifest exists but no chunk_NNN.wav files"
+    elif not primary:
+        info["reason"] = "no segment events in stream_fast.jsonl / stream_hq.jsonl"
+    return info
+
+
+def _format_inventory(infos: list[dict], mode: str, min_s: float, max_s: float, per_segment: bool) -> str:
+    """One row per session, columns describing capability. ``rows`` is
+    the exact count this session would emit at build time (accounts for
+    duration filter and mode-specific annotation predicate)."""
+    if not infos:
+        return "no sessions found.\n"
+    headers = ("session", "audio", "segs", "ann", "full", "part", "untch", "rej", "rows", "note")
+    out_rows: list[tuple] = []
+    usable = 0
+    total_rows = 0
+    for info in infos:
+        # The exact-count call. Cheaper than it looks: just re-parses
+        # already-loaded JSONL paths to count, no audio decoding.
+        produced = _session_rows(info["path"], mode, min_s, max_s, per_segment=per_segment)
+        n = len(produced)
+        total_rows += n
+        if info["reason"]:
+            note = info["reason"]
+        elif n == 0:
+            # Distinguish "duration filter ate everything" from "nothing annotated".
+            longest = info.get("longest_chunk_s", 0.0)
+            shortest = info.get("shortest_chunk_s", 0.0)
+            unit = "segments" if per_segment else "chunks"
+            if (
+                not per_segment
+                and info["chunks_in_manifest"] > 0
+                and (longest > max_s or shortest < min_s)
+            ):
+                note = f"all chunks outside duration filter [{min_s}, {max_s}]s (range {shortest:.1f}–{longest:.1f}s)"
+            else:
+                note = f"no qualifying {unit} under mode={mode}"
+        else:
+            note = ""
+            usable += 1
+        out_rows.append((
+            info["session"],
+            f"{info['wav_count']}/{info['chunks_in_manifest']}",
+            f"{info['primary_segments']}{'(hq)' if info['primary_stream']=='hq' else '(fast)' if info['primary_stream']=='fast' else ''}",
+            str(info["annotated_segments"]),
+            str(info["fully_annotated_chunks"]),
+            str(info["partially_annotated_chunks"]),
+            str(info["untouched_chunks"]),
+            str(info["rejected_chunks"]),
+            str(n),
+            note,
+        ))
+    widths = [max(len(h), max(len(r[i]) for r in out_rows)) for i, h in enumerate(headers)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    lines = [fmt.format(*headers), fmt.format(*["-" * w for w in widths])]
+    for r in out_rows:
+        lines.append(fmt.format(*r))
+    lines.append("")
+    lines.append(
+        f"mode={mode}  unit={'segment' if per_segment else 'chunk'}  "
+        f"duration filter=[{min_s}, {max_s}]s  "
+        f"sessions={len(infos)}  usable={usable}  total_rows={total_rows}"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _session_rows(
+    session_dir: str,
+    mode: str,
+    min_s: float,
+    max_s: float,
+    per_segment: bool = False,
+) -> list[dict]:
+    """Returns one row per included unit (chunk in default mode, segment
+    in ``per_segment`` mode). Each row carries enough metadata for the
+    fine-tune script to slice audio at load time."""
     manifest = _read_jsonl(os.path.join(session_dir, "audio", "manifest.jsonl"))
     if not manifest:
         return []
@@ -197,6 +410,56 @@ def _session_rows(session_dir: str, mode: str, min_s: float, max_s: float) -> li
 
     rows: list[dict] = []
     session_id = os.path.basename(os.path.normpath(session_dir))
+
+    if per_segment:
+        for c in sorted(chunks, key=lambda x: x["idx"]):
+            cidx = c["idx"]
+            if chunk_ann.get(cidx, {}).get("status") == "rejected":
+                continue
+            if not os.path.isfile(c["audio_path"]):
+                continue
+            segs = by_chunk.get(cidx, [])
+            if not segs:
+                continue
+            # In hybrid mode, the qualifying signal is "this chunk has
+            # at least one annotated segment" — skip the whole chunk
+            # otherwise. Strict applies per-segment below.
+            if mode == "hybrid":
+                if not any((cidx, s["segment_idx"]) in seg_ann for s in segs):
+                    continue
+            for s in segs:
+                sidx = s["segment_idx"]
+                ann = seg_ann.get((cidx, sidx))
+                if mode == "strict" and ann is None:
+                    continue
+                text = (ann["text"] if ann else s["text"]).strip()
+                if not text:
+                    continue
+                # Segment audio range is session-absolute; convert to
+                # WAV-relative by subtracting chunk t_start. Clamp to
+                # [0, chunk_duration] to be safe against off-by-epsilon
+                # at boundaries.
+                start = max(0.0, s["t_start"] - c["t_start"])
+                end = min(c["duration_s"], s["t_end"] - c["t_start"])
+                if end <= start:
+                    continue
+                dur = end - start
+                if dur < min_s or dur > max_s:
+                    continue
+                rows.append({
+                    "audio": c["audio_path"],
+                    "audio_start_s": round(start, 3),
+                    "audio_end_s": round(end, 3),
+                    "text": text,
+                    "session": session_id,
+                    "chunk_idx": cidx,
+                    "segment_idx": sidx,
+                    "duration_s": round(dur, 3),
+                    "annotated": ann is not None,
+                })
+        return rows
+
+    # Per-chunk path (original behavior).
     for c in sorted(chunks, key=lambda x: x["idx"]):
         cidx = c["idx"]
         if chunk_ann.get(cidx, {}).get("status") == "rejected":
@@ -263,11 +526,40 @@ def main(argv: Optional[list[str]] = None) -> int:
             "                       un-annotated segments fall back to original.\n"
         ),
     )
-    p.add_argument("session_dirs", nargs="+", help="One or more session directories.")
-    p.add_argument("--out", required=True, help="Output directory for train.jsonl + validation.jsonl.")
+    p.add_argument(
+        "session_dirs", nargs="+",
+        help=(
+            "One or more session directories. May also be a parent directory "
+            "(e.g. `transcripts/`) — its immediate children are scanned for "
+            "session-shaped subdirectories."
+        ),
+    )
+    p.add_argument(
+        "--list", action="store_true", dest="list_only",
+        help=(
+            "Dry-run: print an inventory of each discovered session "
+            "(audio, segments, annotation coverage, would-it-be-usable for "
+            "the chosen --mode) and exit without writing any files."
+        ),
+    )
+    p.add_argument(
+        "--out", default=None,
+        help="Output directory for train.jsonl + validation.jsonl (required unless --list).",
+    )
     p.add_argument(
         "--mode", choices=("overlay", "strict", "hybrid"), default="overlay",
-        help="Chunk inclusion policy (default: overlay).",
+        help="Inclusion policy (default: overlay).",
+    )
+    p.add_argument(
+        "--per-segment", action="store_true",
+        help=(
+            "Emit one row per HQ segment (or fast fallback) instead of "
+            "one row per chunk. The row carries `audio_start_s` + "
+            "`audio_end_s` so finetune_whisper.py slices the WAV in "
+            "memory at load time. This is the right mode when chunks "
+            "are longer than Whisper's 30s encoder window (every chunk "
+            "longer than 30s would otherwise be truncated)."
+        ),
     )
     p.add_argument(
         "--val-fraction", type=float, default=0.1,
@@ -278,15 +570,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--max-s", type=float, default=30.0, help="Drop chunks longer than this (default: 30.0s).")
     args = p.parse_args(argv)
 
+    if not args.list_only and not args.out:
+        print("--out is required (unless --list)", file=sys.stderr)
+        return 2
+
+    sessions = _discover_sessions(args.session_dirs)
+    if not sessions:
+        print("no session directories discovered", file=sys.stderr)
+        return 1
+
+    if args.list_only:
+        infos = [_probe_session(sd) for sd in sessions]
+        print(_format_inventory(infos, args.mode, args.min_s, args.max_s, args.per_segment))
+        return 0
+
+    unit = "segments" if args.per_segment else "chunks"
     all_rows: list[dict] = []
-    for sd in args.session_dirs:
-        sd_abs = os.path.abspath(sd)
-        if not os.path.isdir(sd_abs):
-            print(f"skip (not a dir): {sd}", file=sys.stderr)
+    for sd in sessions:
+        rows = _session_rows(sd, args.mode, args.min_s, args.max_s, per_segment=args.per_segment)
+        # Annotate the reason when a session contributes 0 rows so the
+        # operator can tell "not yet annotated" from "no audio".
+        if not rows:
+            probe = _probe_session(sd)
+            reason = probe["reason"] or f"no qualifying {unit} under mode={args.mode}"
+            print(f"{probe['session']}: 0 {unit}  [{reason}]")
             continue
-        rows = _session_rows(sd_abs, args.mode, args.min_s, args.max_s)
-        print(f"{os.path.basename(sd_abs)}: {len(rows)} chunks")
         all_rows.extend(rows)
+        print(f"{os.path.basename(sd)}: {len(rows)} {unit}")
 
     if not all_rows:
         print("no rows produced — nothing to write", file=sys.stderr)

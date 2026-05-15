@@ -1,0 +1,22 @@
+# Training-only dependencies. Kept separate from the dictation runtime so
+# the live app stays lean (no torch/transformers in the import path of
+# `voice_dictation_persistent.py`). Install in a separate venv:
+#
+#   python3 -m venv .venv-train && source .venv-train/bin/activate
+#   pip install -r voice_dictation/tools/requirements-training.txt
+#
+# On Apple Silicon the bundled torch wheels are MPS-enabled by default;
+# no extra flags needed.
+
+torch>=2.2
+transformers>=4.40
+peft>=0.10
+accelerate>=0.30
+datasets>=2.18
+evaluate
+jiwer
+soundfile
+# CT2 conversion (Phase D — convert_to_ct2.sh). Listed here so a single
+# install gets both train + convert; the dictation runtime already pulls
+# ctranslate2 via faster-whisper.
+ctranslate2>=4.0

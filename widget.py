@@ -1686,14 +1686,19 @@ _ANNOTATE_HTML = r"""<!doctype html>
   #pane .chunkbar .right { margin-left: auto; display: flex; gap: 8px; }
   #player { display: flex; align-items: center; gap: 10px; }
   #player audio { flex: 1; height: 32px; }
+  #player .winsize { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+  #player .winsize input { width: 56px; background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; border-radius: 4px; font: inherit; font-size: 12px; text-align: right; }
+  #player .winsize input:focus { outline: none; border-color: var(--accent); }
   #player .winrange { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-width: 180px; text-align: right; }
   #segments { overflow-y: auto; padding-right: 4px; }
   .seg { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
   .seg.active { border-color: var(--accent); }
   .seg.now { background: var(--panel2); }
   .seg .head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .seg .t { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; cursor: pointer; }
+  .seg .t { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
   .seg .t:hover { color: var(--accent); }
+  .seg.no-audio .t { cursor: not-allowed; text-decoration: line-through; }
+  .seg.no-audio { opacity: 0.65; }
   .seg .actions { margin-left: auto; display: flex; gap: 6px; }
   .seg .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .seg .col label { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
@@ -1736,6 +1741,7 @@ _ANNOTATE_HTML = r"""<!doctype html>
     </div>
     <div id="player">
       <audio id="audio" preload="auto" controls></audio>
+      <label class="winsize">±<input id="win-input" type="number" min="1" max="600" step="1" value="15">s</label>
       <span class="winrange" id="winrange">—</span>
     </div>
     <div class="strip" id="strip"></div>
@@ -1750,7 +1756,9 @@ _ANNOTATE_HTML = r"""<!doctype html>
 (() => {
 'use strict';
 
-const WINDOW_S = 15;  // ±15s around currentTime
+const DEFAULT_WINDOW_S = 15;  // ±N seconds around currentTime; adjustable in UI.
+const WINDOW_MIN = 1;
+const WINDOW_MAX = 600;       // 10 minutes — anything larger gets unwieldy to scroll.
 
 const state = {
   chunks: [],        // [{idx, t_start, t_end, segments, alt_segments, ...}]
@@ -1759,6 +1767,7 @@ const state = {
   segCursor: 0,      // index within current chunk's segments[]
   pendingSaves: new Map(),  // segment_idx -> raw textarea value
   lastVisibleKey: '',       // signature of currently-rendered segment set
+  windowS: DEFAULT_WINDOW_S,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -1901,13 +1910,109 @@ function activeChunk() {
 
 function currentWindow() {
   const t = audio.currentTime || 0;
-  return [t - WINDOW_S, t + WINDOW_S];
+  return [t - state.windowS, t + state.windowS];
+}
+
+// ---------------------------------------------------------------------------
+// Session-time ↔ WAV-time mapping
+// ---------------------------------------------------------------------------
+//
+// The WAV is NOT necessarily wall-clock-aligned with the session
+// timeline. When the user mutes (or any internal silence > 0.25s of
+// frame-gap occurs), the archiver elides that region — the chunk's
+// session-time span can be much longer than its WAV duration. The
+// `audio_segments` list in the manifest is the source of truth: each
+// row maps a WAV byte range to its session-time coverage.
+//
+// Without this mapping, clicking a segment whose session-time falls
+// before the first audio_segment seeks to the wrong audio entirely
+// (e.g. session t=233s in a session where audio starts at session
+// t=483s would land at WAV second 233, which is actually session
+// t=716s).
+
+function _segmentsOf(c) {
+  return (c && c.audio_segments) ? c.audio_segments : [];
+}
+
+function wavTotalDuration(c) {
+  // Total WAV length in seconds. Used by the strip + cursor renderer.
+  const segs = _segmentsOf(c);
+  if (segs.length === 0) return c ? c.duration_s : 0;
+  const last = segs[segs.length - 1];
+  return last.wav_offset_s + last.duration_s;
+}
+
+function sessionToWav(c, sessT) {
+  // Map a session-absolute time to the corresponding WAV offset, or
+  // null if no audio exists for that session time.
+  const segs = _segmentsOf(c);
+  if (segs.length === 0) {
+    return Math.max(0, sessT - c.t_start);
+  }
+  for (const s of segs) {
+    if (sessT >= s.t_start && sessT <= s.t_end) {
+      return s.wav_offset_s + (sessT - s.t_start);
+    }
+  }
+  return null;
+}
+
+function sessionToWavClamped(c, sessT) {
+  // Like sessionToWav but always returns a valid WAV offset: clamps to
+  // the nearest segment boundary when sessT falls in a gap or outside
+  // all coverage. Used for click-to-seek so we always land somewhere.
+  const segs = _segmentsOf(c);
+  if (segs.length === 0) {
+    return Math.max(0, sessT - c.t_start);
+  }
+  // Before all segments → start of first segment.
+  if (sessT < segs[0].t_start) return segs[0].wav_offset_s;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    if (sessT >= s.t_start && sessT <= s.t_end) {
+      return s.wav_offset_s + (sessT - s.t_start);
+    }
+    // In the gap between this segment and the next → snap to next segment start.
+    const next = segs[i + 1];
+    if (next && sessT > s.t_end && sessT < next.t_start) {
+      return next.wav_offset_s;
+    }
+  }
+  // After all segments → end of last.
+  const last = segs[segs.length - 1];
+  return last.wav_offset_s + last.duration_s;
+}
+
+function wavToSession(c, wavT) {
+  // Inverse mapping for the "now" highlight + winrange display.
+  const segs = _segmentsOf(c);
+  if (segs.length === 0) {
+    return wavT + c.t_start;
+  }
+  for (const s of segs) {
+    const segEnd = s.wav_offset_s + s.duration_s;
+    if (wavT >= s.wav_offset_s && wavT <= segEnd) {
+      return s.t_start + (wavT - s.wav_offset_s);
+    }
+  }
+  // Beyond all segs — clamp to last segment end.
+  const last = segs[segs.length - 1];
+  return last.t_end;
+}
+
+function segmentHasAudio(c, s) {
+  return sessionToWav(c, s.t_start) !== null
+      || sessionToWav(c, s.t_end) !== null;
 }
 
 function computeVisible(c) {
+  // currentWindow() returns a window centered on audio.currentTime in
+  // *WAV* seconds. Convert to *session* seconds via the audio_segments
+  // mapping before filtering segments (whose times are session-absolute).
   const [lo, hi] = currentWindow();
-  const sessLo = lo + c.t_start;
-  const sessHi = hi + c.t_start;
+  const sessCenter = wavToSession(c, audio.currentTime || 0);
+  const sessLo = sessCenter - state.windowS;
+  const sessHi = sessCenter + state.windowS;
   return c.segments.filter(s => s.t_end >= sessLo && s.t_start <= sessHi);
 }
 
@@ -1937,8 +2042,9 @@ function renderSegments(force) {
     return;
   }
   const audioT = audio.currentTime || 0;
+  const sessNow = wavToSession(c, audioT);
   $('#winrange').textContent =
-    `window ${(audioT - WINDOW_S).toFixed(1)}s → ${(audioT + WINDOW_S).toFixed(1)}s (chunk-rel)`;
+    `±${state.windowS.toFixed(0)}s · session ${(sessNow - state.windowS).toFixed(1)}s → ${(sessNow + state.windowS).toFixed(1)}s`;
 
   const visible = computeVisible(c);
   const key = visibleKey(visible);
@@ -1959,7 +2065,7 @@ function renderSegments(force) {
   }
 
   state.lastVisibleKey = key;
-  const sessAudio = audioT + c.t_start;
+  const sessAudio = wavToSession(c, audioT);
   if (visible.length === 0) {
     wrap.innerHTML = '<div class="empty">no segments in ±15s window — scrub to find some</div>';
     return;
@@ -1984,12 +2090,18 @@ function renderSegments(force) {
     if (isActive) row.classList.add('active');
     row.dataset.sidx = s.segment_idx;
 
-    const startRel = s.t_start - c.t_start;
-    const endRel = s.t_end - c.t_start;
+    // Show session-absolute times — that's what stream_*.jsonl uses, so
+    // matching them up to other tools / log inspection is easier than
+    // showing chunk-relative or wav-relative offsets. Click-to-seek
+    // converts to the WAV offset via the audio_segments mapping.
+    const sessStart = s.t_start;
+    const sessEnd = s.t_end;
+    const hasAudio = segmentHasAudio(c, s);
+    const tHint = hasAudio ? 'click to seek' : 'no audio — outside WAV coverage';
 
     row.innerHTML = `
       <div class="head">
-        <span class="t" title="seek">${startRel.toFixed(2)}s – ${endRel.toFixed(2)}s</span>
+        <span class="t" title="${tHint}">${sessStart.toFixed(2)}s – ${sessEnd.toFixed(2)}s${hasAudio ? '' : ' (no audio)'}</span>
         <span class="pill ${status === 'untouched' ? '' : status}">${status === 'untouched' ? 'original' : status.replace('_',' ')}</span>
         <div class="actions">
           <button data-act="save">save</button>
@@ -2008,6 +2120,7 @@ function renderSegments(force) {
         </div>
       </div>
     `;
+    if (!hasAudio) row.classList.add('no-audio');
     const ta = row.querySelector('textarea');
     ta.value = edited;
     ta.addEventListener('input', () => {
@@ -2026,7 +2139,8 @@ function renderSegments(force) {
       if (i >= 0) state.segCursor = i;
     });
     row.querySelector('.t').addEventListener('click', () => {
-      audio.currentTime = Math.max(0, startRel);
+      const wavT = sessionToWavClamped(c, s.t_start);
+      audio.currentTime = Math.max(0, wavT);
     });
     row.querySelector('[data-act="save"]').addEventListener('click', () => {
       saveSegment(c.idx, s.segment_idx, ta.value, 'edited');
@@ -2049,7 +2163,7 @@ function updateNowHighlights(c, audioT) {
   // Cheap class toggling on already-rendered segment rows — does NOT
   // touch any textarea, so it's safe to call from the timeupdate
   // listener at audio's native ~4 Hz cadence.
-  const sessAudio = audioT + c.t_start;
+  const sessAudio = wavToSession(c, audioT);
   const rows = document.querySelectorAll('#segments .seg');
   rows.forEach(row => {
     const sidx = Number(row.dataset.sidx);
@@ -2060,19 +2174,26 @@ function updateNowHighlights(c, audioT) {
   });
   // Also refresh the winrange label so the user sees the window slide.
   $('#winrange').textContent =
-    `window ${(audioT - WINDOW_S).toFixed(1)}s → ${(audioT + WINDOW_S).toFixed(1)}s (chunk-rel)`;
+    `±${state.windowS.toFixed(0)}s · session ${(sessAudio - state.windowS).toFixed(1)}s → ${(sessAudio + state.windowS).toFixed(1)}s`;
 }
 
 function renderStrip() {
   const strip = $('#strip');
   const c = activeChunk();
   strip.innerHTML = '';
-  if (!c || !c.duration_s) return;
+  if (!c) return;
+  const wavDur = wavTotalDuration(c);
+  if (!wavDur) return;
   for (const seg of c.audio_segments || []) {
     const b = document.createElement('div');
     b.className = 'seg-block';
-    const left = (seg.wav_offset_s / c.duration_s) * 100;
-    const w = (seg.duration_s / c.duration_s) * 100;
+    // Strip positions are in WAV time (matches the audio element's
+    // seek bar), not session time — that's why we use wavDur as the
+    // denominator. The audio_segments together cover the entire WAV,
+    // so visually this looks like a solid bar; gaps in coverage
+    // correspond to session-time gaps that don't exist in the WAV.
+    const left = (seg.wav_offset_s / wavDur) * 100;
+    const w = (seg.duration_s / wavDur) * 100;
     b.style.left = left + '%';
     b.style.width = w + '%';
     strip.appendChild(b);
@@ -2087,8 +2208,10 @@ function renderStrip() {
 function updateStripCursor() {
   const c = activeChunk();
   const cur = document.getElementById('strip-cur');
-  if (!c || !cur || !c.duration_s) return;
-  const pct = ((audio.currentTime || 0) / c.duration_s) * 100;
+  if (!c || !cur) return;
+  const wavDur = wavTotalDuration(c);
+  if (!wavDur) return;
+  const pct = ((audio.currentTime || 0) / wavDur) * 100;
   cur.style.left = pct + '%';
 }
 
@@ -2167,8 +2290,8 @@ function moveSegment(delta) {
   if (!c || c.segments.length === 0) return;
   state.segCursor = Math.max(0, Math.min(c.segments.length - 1, state.segCursor + delta));
   const s = c.segments[state.segCursor];
-  const relStart = s.t_start - c.t_start;
-  audio.currentTime = Math.max(0, relStart);
+  const wavT = sessionToWavClamped(c, s.t_start);
+  audio.currentTime = Math.max(0, wavT);
 }
 
 // -------------------------------------------------------------------------
@@ -2232,6 +2355,19 @@ $('#btn-prev-chunk').addEventListener('click', () => moveChunk(-1));
 $('#btn-next-chunk').addEventListener('click', () => moveChunk(1));
 $('#btn-reject').addEventListener('click', () => {
   if (state.activeIdx != null) toggleReject(state.activeIdx);
+});
+
+const winInput = $('#win-input');
+winInput.value = String(state.windowS);
+winInput.addEventListener('change', () => {
+  let v = Number(winInput.value);
+  if (!Number.isFinite(v)) v = DEFAULT_WINDOW_S;
+  v = Math.max(WINDOW_MIN, Math.min(WINDOW_MAX, Math.round(v)));
+  winInput.value = String(v);
+  state.windowS = v;
+  // Force a rebuild — the visible-set signature is unchanged from the
+  // renderer's POV, but the set itself can grow/shrink.
+  renderSegments(true);
 });
 
 // -------------------------------------------------------------------------
