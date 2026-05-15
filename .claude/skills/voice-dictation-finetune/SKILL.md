@@ -176,7 +176,35 @@ Swap in via the widget config panel: open the live app's widget URL, the model d
 "fast": {"fw": {"model": "voice_dictation/models/finetune_<date>_hf_ct2"}}
 ```
 
-Restart the live app — faster-whisper loads the model from path at startup.
+Restart the live app — or, when only the `fw.model` / `fw.compute` / `fw.beam_size` / `fw.condition_on_previous_text` changed, the widget will hot-reload the affected transcribers on the next window (the toast reports which streams reloaded). Other fields (window sizes, preprocessor, device) still need a restart.
+
+## Side utility — plain-text transcript export
+
+For pasting transcripts into an external analyzer (or feeding into a local LLM downstream), `tools/export_transcripts.py` emits one `.txt` per session with a header (session name, recorded time, source audio for regenerated sessions, exported_at). Uses the same merge logic the annotator UI does (HQ-preferred + annotation overrides + skip rejected chunks).
+
+```bash
+# Per-session files in an out dir:
+python -m voice_dictation.tools.export_transcripts \
+    --root voice_dictation/regenerated_sessions \
+    --out  voice_dictation/transcripts_text
+
+# Date-filter + combined into one file (good for paste-into-LLM):
+python -m voice_dictation.tools.export_transcripts \
+    --root voice_dictation/sessions \
+    --since 2026-05-13 --until 2026-05-15 \
+    --combined --out voice_dictation/transcripts_text
+
+# Specific session dirs (positional, may be mixed with --root):
+python -m voice_dictation.tools.export_transcripts \
+    voice_dictation/sessions/20260515_224523 \
+    --out voice_dictation/transcripts_text
+```
+
+Notes:
+- `--since` / `--until` filter by the leading `YYYYMMDD_HHMMSS` stamp in the session dir name (works for both live and `regen_*` dirs). `--until` is inclusive (end-of-day).
+- Segments are paragraph-broken on silence gaps ≥ 1.5 s.
+- Empty-text annotations (hallucinations the annotator wiped) are dropped.
+- Rejected chunks are skipped entirely.
 
 ## Quick reference — files
 
@@ -187,6 +215,7 @@ Restart the live app — faster-whisper loads the model from path at startup.
 | `voice_dictation/annotate_session.py` | Step 4 — launch annotator (single or `--root` multi mode) |
 | `voice_dictation/tools/build_dataset.py` | Step 5 — slice clips + manifest |
 | `voice_dictation/tools/finetune_whisper.py` | Step 6 — LoRA train on MPS |
+| `voice_dictation/tools/export_transcripts.py` | Side — plain-text transcript dump (for downstream analysis / local LLM) |
 | `voice_dictation/tools/convert_to_ct2.sh` | Step 6 — HF → CT2 conversion |
 | `voice_dictation/FINETUNE_PLAN.md` | Deeper design notes for steps 2–6 |
 
