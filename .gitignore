@@ -1,5 +1,6 @@
-__pycache__/
+sessions/
 *.pyc
+__pycache__/
 recordings/
 .env
 recordings.zip
