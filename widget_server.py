@@ -1007,13 +1007,31 @@ const settingsStatus = document.getElementById("settings-status");
 let configRaw = null;     // last loaded config (for unknown-shape preservation)
 let editMode = "form";    // "form" | "json"
 
-// Curated faster-whisper model list — same as v1 widget. Plain select
-// (not a combobox) so the dropdown renders inline. Edit the raw JSON if
-// you need a model name not in this list.
-const FW_MODELS = [
+// Model picker list — populated from the /models endpoint at load time.
+// Hub ids (auto-download via faster-whisper) followed by any local
+// CT2 fine-tuned model directories under voice_dictation/models/.
+// Entries are either a plain string (hub id) or
+// {label, value, group} for grouped/local entries.
+let FW_MODELS = [
   "tiny.en", "base.en", "small.en", "medium.en",
   "large-v3", "distil-large-v3",
 ];
+
+async function refreshModelList() {
+  try {
+    const r = await fetch("/models");
+    if (!r.ok) return;
+    const data = await r.json();
+    const out = [];
+    for (const id of data.hub || []) out.push(id);
+    for (const m of data.local || []) {
+      if (!m.valid) continue;
+      // Label distinguishes a local fine-tune from a hub id.
+      out.push({label: "📁 " + m.name, value: m.path});
+    }
+    if (out.length) FW_MODELS = out;
+  } catch (e) { /* ignore — defaults still work */ }
+}
 
 // Per-path hints for controls that aren't trivially inferable from the
 // value type. Path uses dot-notation against the config root.
@@ -1074,10 +1092,16 @@ function buildControl(path, value) {
     sel.dataset.cfgPath = path;
     sel.dataset.cfgType = typeof value === "number" ? "number" : "string";
     const current = String(value == null ? "" : value);
-    const inList = hint.select.some(o => String(o) === current);
+    // Options may be plain strings/numbers OR {label, value} objects (for
+    // local fine-tuned models where the display name differs from the path).
+    const optValue = o => String(o && typeof o === "object" ? o.value : o);
+    const optLabel = o => {
+      if (o && typeof o === "object") return o.label || String(o.value);
+      const s = String(o);
+      return s || "(auto)";
+    };
+    const inList = hint.select.some(o => optValue(o) === current);
     if (!inList) {
-      // Preserve the saved value as a first option so the user's choice
-      // survives a save round-trip even if it's not in the curated list.
       const o = document.createElement("option");
       o.value = current;
       o.textContent = current ? `${current} (custom)` : "(auto)";
@@ -1086,9 +1110,9 @@ function buildControl(path, value) {
     }
     for (const opt of hint.select) {
       const o = document.createElement("option");
-      o.value = String(opt);
-      o.textContent = String(opt) || "(auto)";
-      if (String(opt) === current) o.selected = true;
+      o.value = optValue(opt);
+      o.textContent = optLabel(opt);
+      if (optValue(opt) === current) o.selected = true;
       sel.appendChild(o);
     }
     if (hint.readonly) sel.disabled = true;
@@ -1279,6 +1303,11 @@ function setMode(mode) {
 async function loadSettings() {
   setSettingsStatus("loading…");
   try {
+    // Refresh model list first so the form's model selects render with
+    // the latest local fine-tuned models on first paint.
+    await refreshModelList();
+    CFG_HINTS["fast.fw.model"].select = FW_MODELS;
+    CFG_HINTS["hq.fw.model"].select = FW_MODELS;
     const r = await fetch("/config");
     const data = await r.json();
     if (data.error) { setSettingsStatus(data.error, "err"); return; }
@@ -1360,6 +1389,7 @@ class WidgetServer:
         paste_log_size: int = 200,
         cfg: Optional[RuntimeConfig] = None,
         stats_modules: Optional[dict] = None,
+        models_dir: Optional[str] = None,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -1369,6 +1399,15 @@ class WidgetServer:
         # Map of label → object with stats() — used by /stats endpoint.
         # Order is preserved for UI rendering.
         self._stats_modules: dict = stats_modules or {}
+        # Where to scan for local CT2 fine-tuned model directories. The
+        # /models endpoint lists each subdirectory containing both
+        # ``model.bin`` and ``tokenizer.json`` (faster-whisper's minimum
+        # requirements). Falls back to ``voice_dictation/models/``
+        # relative to the package root.
+        if models_dir is None:
+            from pathlib import Path as _Path
+            models_dir = str(_Path(__file__).parent / "models")
+        self._models_dir = models_dir
 
         # Recent-events ring (for the debug timeline + recent-events panel).
         self._events: deque = deque(maxlen=recent_events_ring_size)
@@ -1444,6 +1483,9 @@ class WidgetServer:
                     return
                 if self.path == "/stats":
                     self._send_json(outer._get_stats())
+                    return
+                if self.path == "/models":
+                    self._send_json(outer._get_models())
                     return
                 self.send_error(404)
 
@@ -1530,7 +1572,12 @@ class WidgetServer:
                     self._capture = "aside"
                     self._aside_started_at = ev.emit_accepted_ms
                 elif a == "aside_ended":
-                    self._capture = "passive"
+                    # Restore prior state: if a recording is still open,
+                    # go back to "recording"; otherwise passive.
+                    self._capture = (
+                        "recording" if self._recording_started_at is not None
+                        else "passive"
+                    )
                     self._aside_started_at = None
                 elif a == "mute_toggle":
                     self._muted = not self._muted
@@ -1550,6 +1597,7 @@ class WidgetServer:
                     "start_accepted_ms": ev.payload.get("start_accepted_ms"),
                     "end_accepted_ms": ev.payload.get("end_accepted_ms"),
                     "text": ev.payload.get("text", ""),
+                    "is_aside": ev.payload.get("is_aside", False),
                 })
 
     @staticmethod
@@ -1577,6 +1625,44 @@ class WidgetServer:
             "now_accepted_ms": self._clock.now_accepted_ms(),
             "modules": modules,
             "bus": bus_stats,
+        }
+
+    def _get_models(self) -> dict:
+        """List available Whisper models.
+
+        Returns:
+          ``hub``: canonical HuggingFace ids that faster-whisper auto-downloads.
+          ``local``: subdirectories of ``self._models_dir`` that look like
+                     a valid faster-whisper CT2 model (contain ``model.bin``
+                     and a tokenizer file). Each entry is
+                     ``{name, path, valid}`` where ``path`` is what should be
+                     written into ``fast.fw.model`` / ``hq.fw.model``.
+        """
+        from pathlib import Path as _P
+        hub = [
+            "tiny.en", "base.en", "small.en", "medium.en",
+            "large-v3", "distil-large-v3",
+        ]
+        local: list[dict] = []
+        d = _P(self._models_dir)
+        if d.is_dir():
+            for sub in sorted(d.iterdir()):
+                if not sub.is_dir():
+                    continue
+                has_bin = (sub / "model.bin").exists()
+                has_tok = (
+                    (sub / "tokenizer.json").exists()
+                    or (sub / "vocabulary.json").exists()
+                )
+                local.append({
+                    "name": sub.name,
+                    "path": str(sub),
+                    "valid": has_bin and has_tok,
+                })
+        return {
+            "hub": hub,
+            "local": local,
+            "models_dir": str(d),
         }
 
     def _get_config(self) -> dict:

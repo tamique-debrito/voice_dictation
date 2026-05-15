@@ -252,6 +252,7 @@ class UserActionManager:
                     "start_press_idx": press_idx,
                     "start_accepted_ms": accepted_ms,
                     "start_real_ms": real_ms,
+                    "asides": [],
                 }
                 self._publish_action(
                     "recording_started",
@@ -262,6 +263,26 @@ class UserActionManager:
                     accepted_ms,
                 )
             else:
+                # Auto-close any dangling aside at recording end.
+                if self._open_aside is not None:
+                    a = self._open_aside
+                    self._open_aside = None
+                    self._publish_action(
+                        "aside_ended",
+                        {
+                            "start_press_idx": a["start_press_idx"],
+                            "end_press_idx": press_idx,
+                            "start_accepted_ms": a["start_accepted_ms"],
+                            "end_accepted_ms": accepted_ms,
+                        },
+                        accepted_ms,
+                    )
+                    self._open_recording["asides"].append({
+                        "start_press_idx": a["start_press_idx"],
+                        "end_press_idx": press_idx,
+                        "start_accepted_ms": a["start_accepted_ms"],
+                        "end_accepted_ms": accepted_ms,
+                    })
                 rec = self._open_recording
                 self._open_recording = None
                 self._publish_action(
@@ -271,6 +292,7 @@ class UserActionManager:
                         "end_press_idx": press_idx,
                         "start_accepted_ms": rec["start_accepted_ms"],
                         "end_accepted_ms": accepted_ms,
+                        "aside_intervals": rec["asides"],
                     },
                     accepted_ms,
                 )
@@ -291,22 +313,23 @@ class UserActionManager:
             else:
                 a = self._open_aside
                 self._open_aside = None
-                self._publish_action(
-                    "aside_ended",
-                    {
-                        "start_press_idx": a["start_press_idx"],
-                        "end_press_idx": press_idx,
-                        "start_accepted_ms": a["start_accepted_ms"],
-                        "end_accepted_ms": accepted_ms,
-                    },
-                    accepted_ms,
-                )
+                interval = {
+                    "start_press_idx": a["start_press_idx"],
+                    "end_press_idx": press_idx,
+                    "start_accepted_ms": a["start_accepted_ms"],
+                    "end_accepted_ms": accepted_ms,
+                }
+                if self._open_recording is not None:
+                    self._open_recording["asides"].append(interval)
+                self._publish_action("aside_ended", interval, accepted_ms)
             return
 
         if action == "discard":
             if self._open_recording is not None:
                 rec = self._open_recording
                 self._open_recording = None
+                # Drop any open aside as well; cancellation supersedes it.
+                self._open_aside = None
                 self._publish_action(
                     "cancel",
                     {

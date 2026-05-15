@@ -53,6 +53,8 @@ class _PendingPaste:
     start_accepted_ms: int
     end_accepted_ms: int
     received_at_accepted_ms: int
+    is_aside: bool = False
+    exclude_intervals: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -234,9 +236,16 @@ class TranscriptStreamManager:
     # ------------------------------------------------------------------
 
     def _on_action(self, ev: Event) -> None:
-        if ev.payload.get("action") != "paste_window_complete":
+        action = ev.payload.get("action")
+        if action not in ("paste_window_complete", "aside_ended"):
             return
         self._paste_seq += 1
+        is_aside = action == "aside_ended"
+        aside_intervals = ev.payload.get("aside_intervals") or []
+        exclude = [
+            (a["start_accepted_ms"], a["end_accepted_ms"])
+            for a in aside_intervals
+        ]
         window = _PendingPaste(
             paste_idx=self._paste_seq,
             start_press_idx=ev.payload["start_press_idx"],
@@ -244,6 +253,8 @@ class TranscriptStreamManager:
             start_accepted_ms=ev.payload["start_accepted_ms"],
             end_accepted_ms=ev.payload["end_accepted_ms"],
             received_at_accepted_ms=ev.emit_accepted_ms,
+            is_aside=is_aside,
+            exclude_intervals=exclude,
         )
         with self._pending_lock:
             self._pending.append(window)
@@ -287,31 +298,51 @@ class TranscriptStreamManager:
         tol = self._tolerance_ms
         if hq_up + tol >= end:
             return self._concat_in_range(
-                self._hq.snapshot(), w.start_accepted_ms, end,
+                self._hq.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
             )
         if fast_up + tol >= end:
             return self._concat_in_range(
-                self._fast.snapshot(), w.start_accepted_ms, end,
+                self._fast.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
             )
         if force:
             # Shutdown — emit whatever's available, preferring fast over hq
             # for completeness (fast typically has more coverage live).
             return self._concat_in_range(
-                self._fast.snapshot(), w.start_accepted_ms, end,
+                self._fast.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
             ) or self._concat_in_range(
-                self._hq.snapshot(), w.start_accepted_ms, end,
+                self._hq.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
             )
         return None
 
     @staticmethod
-    def _concat_in_range(segments: list[Segment], start_ms: int, end_ms: int) -> str:
+    def _concat_in_range(
+        segments: list[Segment],
+        start_ms: int,
+        end_ms: int,
+        exclude: list[tuple[int, int]] | None = None,
+    ) -> str:
         # Pick segments whose content range overlaps [start_ms, end_ms].
         # For segments fully inside the range, take whole text. For
         # segments straddling either boundary, use word-level timings to
         # trim to just the words whose midpoints fall inside the range.
+        ex = exclude or []
+
+        def _in_exclude(t: int) -> bool:
+            for a, b in ex:
+                if a <= t < b:
+                    return True
+            return False
+
+        def _seg_fully_excluded(s: Segment) -> bool:
+            for a, b in ex:
+                if s.content_accepted_ms_start >= a and s.content_accepted_ms_end <= b:
+                    return True
+            return False
+
         relevant = [
             s for s in segments
             if s.content_accepted_ms_end > start_ms and s.content_accepted_ms_start < end_ms
+            and not _seg_fully_excluded(s)
         ]
         relevant.sort(key=lambda s: s.content_accepted_ms_start)
         parts: list[str] = []
@@ -320,13 +351,23 @@ class TranscriptStreamManager:
                 s.content_accepted_ms_start >= start_ms
                 and s.content_accepted_ms_end <= end_ms
             )
-            if fully_inside or not s.words:
+            seg_touches_exclude = any(
+                s.content_accepted_ms_end > a and s.content_accepted_ms_start < b
+                for a, b in ex
+            )
+            if fully_inside and not seg_touches_exclude:
                 parts.append(s.text)
+                continue
+            if not s.words:
+                # Without word timings we can't subtract — keep the segment
+                # only if it doesn't overlap an excluded range.
+                if not seg_touches_exclude:
+                    parts.append(s.text)
                 continue
             kept: list[str] = []
             for w in s.words:
                 mid = (w.start_accepted_ms + w.end_accepted_ms) // 2
-                if start_ms <= mid < end_ms:
+                if start_ms <= mid < end_ms and not _in_exclude(mid):
                     kept.append(w.text)
             piece = "".join(kept).strip()
             if piece:
@@ -429,5 +470,6 @@ class TranscriptStreamManager:
                 "start_accepted_ms": w.start_accepted_ms,
                 "end_accepted_ms": w.end_accepted_ms,
                 "text": text,
+                "is_aside": w.is_aside,
             },
         ))
