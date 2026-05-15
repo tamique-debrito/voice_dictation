@@ -3,9 +3,14 @@
 Usage::
 
     python -m voice_dictation.annotate_session <session_dir> [--port 0]
+    python -m voice_dictation.annotate_session --root <folder> [--port 0]
 
-Refuses if ``<session_dir>/audio/manifest.json`` is missing or has no
-chunks. See ``FINETUNE_PLAN.md`` (Phase B) for the design.
+Single-session mode: pass a directory containing ``audio/manifest.json``
+and the usual JSONL streams.
+
+Multi-session mode: pass ``--root <folder>`` to load every immediate
+subdirectory that has an ``audio/manifest.json``. The UI shows a session
+picker dropdown; ``[`` / ``]`` switch between them.
 """
 
 from __future__ import annotations
@@ -24,10 +29,13 @@ from .annotator.server import AnnotatorServer
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="annotate_session",
-        description="Annotate a finalized voice_dictation session "
-                    "for fine-tuning.",
+        description="Annotate one or more finalized voice_dictation sessions.",
     )
-    parser.add_argument("session_dir", help="path to sessions/<ts>/")
+    parser.add_argument("session_dir", nargs="?",
+                        help="path to a single session/<ts>/ (single-session mode)")
+    parser.add_argument("--root", default=None,
+                        help="folder containing multiple session dirs "
+                             "(multi-session mode with picker)")
     parser.add_argument("--port", type=int, default=0,
                         help="HTTP port (0 = random, default)")
     parser.add_argument("--no-open", action="store_true",
@@ -35,24 +43,29 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
+    if (args.session_dir is None) == (args.root is None):
+        parser.error("provide exactly one of <session_dir> or --root <folder>")
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
 
-    session = Path(args.session_dir).resolve()
-    if not session.is_dir():
-        print(f"error: not a directory: {session}", file=sys.stderr)
-        return 2
-
     try:
-        server = AnnotatorServer(session, port=args.port)
+        if args.root:
+            server = AnnotatorServer.from_root(args.root, port=args.port)
+        else:
+            session = Path(args.session_dir).resolve()
+            if not session.is_dir():
+                print(f"error: not a directory: {session}", file=sys.stderr)
+                return 2
+            server = AnnotatorServer(session, port=args.port)
         server.start()
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    url = f"http://127.0.0.1:{server.actual_port}/annotate"
+    url = f"http://127.0.0.1:{server.actual_port}/"
     print(f"annotator: {url}")
     if not args.no_open:
         try:

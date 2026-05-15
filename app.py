@@ -342,11 +342,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             app.start_offline(with_widget=args.widget)
             app.feed_wav(args.feed_wav, max_seconds=args.feed_max_seconds)
             if args.widget:
-                logger.info("widget at http://127.0.0.1:%d/ — Ctrl-C to exit",
-                            app.widget.actual_port if app.widget else 0)
-                stop_evt = threading.Event()
-                signal.signal(signal.SIGINT, lambda *_: stop_evt.set())
-                stop_evt.wait()
+                port = app.widget.actual_port if app.widget else 0
+                from .widget_server import _print_url_banner
+                _print_url_banner("widget", f"http://127.0.0.1:{port}/")
+                logger.info("Ctrl-C to exit")
+                signal.signal(signal.SIGINT, lambda *_: app.stop.set())
+                app.stop.wait()
             return 0
 
         # Live mic mode.
@@ -354,10 +355,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.duration > 0:
             time.sleep(args.duration)
         else:
-            stop_evt = threading.Event()
-            signal.signal(signal.SIGINT, lambda *_: stop_evt.set())
-            logger.info("recording — press Ctrl-C to stop")
-            stop_evt.wait()
+            signal.signal(signal.SIGINT, lambda *_: app.stop.set())
+            logger.info("recording — press Ctrl-C or double-tap Q to stop")
+            app.stop.wait()
         return 0
     finally:
         app.shutdown()

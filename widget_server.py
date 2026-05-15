@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -38,6 +39,34 @@ from .types import Event
 
 
 logger = logging.getLogger(__name__)
+
+
+def _print_url_banner(label: str, url: str) -> None:
+    """Print a high-visibility, clickable URL banner to stderr.
+
+    Uses OSC 8 hyperlinks + ANSI bold/underline/cyan when stderr is a TTY,
+    so the link stands out from log spam and is one-click-openable in
+    modern terminals (iTerm2, Terminal.app, VS Code, Ghostty, …).
+    """
+    stream = sys.stderr
+    is_tty = False
+    try:
+        is_tty = stream.isatty()
+    except Exception:
+        is_tty = False
+    if is_tty:
+        # OSC 8 hyperlink + bold underline cyan.
+        link = f"\x1b]8;;{url}\x1b\\\x1b[1;4;36m{url}\x1b[0m\x1b]8;;\x1b\\"
+        bar = "\x1b[1;36m" + "─" * (len(url) + 4) + "\x1b[0m"
+        msg = f"\n{bar}\n  {label}: {link}\n{bar}\n"
+    else:
+        bar = "─" * (len(url) + 4)
+        msg = f"\n{bar}\n  {label}: {url}\n{bar}\n"
+    try:
+        stream.write(msg)
+        stream.flush()
+    except Exception:
+        pass
 
 
 _INDEX_HTML = r"""<!doctype html>
@@ -1516,7 +1545,9 @@ class WidgetServer:
             target=self._tick_loop, name="widget-tick", daemon=True,
         )
         self._tick_thread.start()
-        logger.info("WidgetServer started on http://127.0.0.1:%d/", self.actual_port)
+        url = f"http://127.0.0.1:{self.actual_port}/"
+        _print_url_banner("widget", url)
+        logger.info("WidgetServer started on %s", url)
 
     def shutdown(self) -> None:
         self._stop.set()
