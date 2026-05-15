@@ -367,7 +367,15 @@ class TranscriptStreamManager:
             kept: list[str] = []
             for w in s.words:
                 mid = (w.start_accepted_ms + w.end_accepted_ms) // 2
-                if start_ms <= mid < end_ms and not _in_exclude(mid):
+                # Lenient inclusion at both edges — Whisper stretches first-word
+                # starts backwards, and pressing the close key twice across a
+                # single word is implausible in practice. Include any word that
+                # overlaps the window at all.
+                in_window = (
+                    w.end_accepted_ms > start_ms
+                    and w.start_accepted_ms < end_ms
+                )
+                if in_window and not _in_exclude(mid):
                     kept.append(w.text)
             piece = "".join(kept).strip()
             if piece:

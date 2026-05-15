@@ -88,6 +88,7 @@ class Transcriber:
         self.segment_q: queue.Queue[Segment] = queue.Queue()
 
         self._model: Optional[WhisperModel] = None
+        self._model_lock = threading.Lock()
         self._rolling_prompt = ""
         self._rolling_prompt_max_chars = 800
         self._thread: Optional[threading.Thread] = None
@@ -115,6 +116,24 @@ class Transcriber:
             "segment_q_size": self.segment_q.qsize(),
             "rolling_prompt_chars": len(self._rolling_prompt),
         }
+
+    def invalidate_model(self) -> None:
+        """Drop the cached model so the next window re-loads from ``self._cfg.fw``.
+
+        Called by the widget when the user saves a new model selection.
+        Safe to call from any thread; if inference is in progress, the
+        running window completes with the old model and the swap takes
+        effect on the next window.
+        """
+        with self._model_lock:
+            old = self._model
+            self._model = None
+            self._rolling_prompt = ""
+        if old is not None:
+            logger.info(
+                "Transcriber(%s) model invalidated; will reload on next window "
+                "(new model=%s)", self.label, self._cfg.fw.model,
+            )
 
     def _ensure_model(self) -> bool:
         if self._model is not None:
@@ -203,10 +222,14 @@ class Transcriber:
                     },
                 ))
                 continue
-            if self._model is None and not self._ensure_model():
-                return
+            # Snapshot the model under the lock so a concurrent reload
+            # (via invalidate_model) can't yank it mid-inference.
+            with self._model_lock:
+                if self._model is None and not self._ensure_model():
+                    return
+                model = self._model
             try:
-                self._transcribe(item)
+                self._transcribe(item, model)
             except Exception:
                 logger.exception("Transcriber(%s) failed on window", self.label)
 
@@ -236,7 +259,7 @@ class Transcriber:
             },
         ))
 
-    def _transcribe(self, win: AudioWindow) -> None:
+    def _transcribe(self, win: AudioWindow, model: "WhisperModel") -> None:
         audio = np.frombuffer(win.pcm, dtype=np.int16).astype(np.float32) / 32768.0
         if audio.size == 0:
             self._emit_completion(win, dropped=True)
@@ -270,7 +293,7 @@ class Transcriber:
         )
         t0 = time.monotonic()
         # vad_filter=False — the preprocessor already stripped silence.
-        segments_iter, _info = self._model.transcribe(
+        segments_iter, _info = model.transcribe(
             audio,
             language="en",
             beam_size=self._cfg.fw.beam_size,

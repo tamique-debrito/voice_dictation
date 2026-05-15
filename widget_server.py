@@ -41,12 +41,29 @@ from .types import Event
 logger = logging.getLogger(__name__)
 
 
-def _print_url_banner(label: str, url: str) -> None:
-    """Print a high-visibility, clickable URL banner to stderr.
+# Fields on FasterWhisperConfig that, when changed, require a model reload.
+# device is auto-resolved post-load and isn't user-settable from the UI;
+# changes to it would require a restart, so we deliberately ignore it.
+_FW_RELOAD_FIELDS = ("model", "compute", "beam_size", "condition_on_previous_text")
 
-    Uses OSC 8 hyperlinks + ANSI bold/underline/cyan when stderr is a TTY,
-    so the link stands out from log spam and is one-click-openable in
-    modern terminals (iTerm2, Terminal.app, VS Code, Ghostty, …).
+
+def _snapshot_fw(fw) -> dict:
+    return {k: getattr(fw, k, None) for k in _FW_RELOAD_FIELDS}
+
+
+def _fw_changed(prev: dict, new_fw) -> bool:
+    return any(prev.get(k) != getattr(new_fw, k, None) for k in _FW_RELOAD_FIELDS)
+
+
+def _print_url_banner(label: str, url: str, extras: list[tuple[str, str]] | None = None) -> None:
+    """Print a high-visibility startup banner to stderr.
+
+    The widget URL is rendered as an OSC 8 hyperlink + ANSI bold/underline/cyan
+    when stderr is a TTY, so it stands out from log spam and is one-click-openable
+    in modern terminals (iTerm2, Terminal.app, VS Code, Ghostty, …).
+
+    ``extras`` is a list of (label, value) pairs printed under the URL — used to
+    surface session dir, hotkeys, models, etc. on startup.
     """
     stream = sys.stderr
     is_tty = False
@@ -54,14 +71,29 @@ def _print_url_banner(label: str, url: str) -> None:
         is_tty = stream.isatty()
     except Exception:
         is_tty = False
+    extras = extras or []
+
+    # Determine box width from longest content line.
+    plain_lines = [f"{label}: {url}"]
+    for k, v in extras:
+        plain_lines.append(f"{k}: {v}")
+    width = max(len(s) for s in plain_lines) + 4
+
     if is_tty:
-        # OSC 8 hyperlink + bold underline cyan.
         link = f"\x1b]8;;{url}\x1b\\\x1b[1;4;36m{url}\x1b[0m\x1b]8;;\x1b\\"
-        bar = "\x1b[1;36m" + "─" * (len(url) + 4) + "\x1b[0m"
-        msg = f"\n{bar}\n  {label}: {link}\n{bar}\n"
+        bar = "\x1b[1;36m" + "─" * width + "\x1b[0m"
+        bold_label = f"\x1b[1m{label}\x1b[0m"
+        url_line = f"  {bold_label}: {link}"
+        extra_lines = [
+            f"  \x1b[1m{k}\x1b[0m: {v}" for k, v in extras
+        ]
     else:
-        bar = "─" * (len(url) + 4)
-        msg = f"\n{bar}\n  {label}: {url}\n{bar}\n"
+        bar = "─" * width
+        url_line = f"  {label}: {url}"
+        extra_lines = [f"  {k}: {v}" for k, v in extras]
+
+    body = "\n".join([bar, url_line, *extra_lines, bar])
+    msg = f"\n{body}\n"
     try:
         stream.write(msg)
         stream.flush()
@@ -1373,7 +1405,10 @@ async function saveSettings() {
     const data = await r.json();
     if (data.error) { setSettingsStatus(data.error, "err"); return; }
     configRaw = parsed;
-    setSettingsStatus("saved → " + data.saved + " (most fields require restart)", "ok");
+    const msg = data.reloaded && data.reloaded.length
+      ? `saved → reloading model on next window: ${data.reloaded.join(", ")}`
+      : `saved → ${data.note || "restart required for some fields"}`;
+    setSettingsStatus(msg, "ok");
   } catch (e) {
     setSettingsStatus("save failed: " + e, "err");
   }
@@ -1545,9 +1580,7 @@ class WidgetServer:
             target=self._tick_loop, name="widget-tick", daemon=True,
         )
         self._tick_thread.start()
-        url = f"http://127.0.0.1:{self.actual_port}/"
-        _print_url_banner("widget", url)
-        logger.info("WidgetServer started on %s", url)
+        logger.info("WidgetServer started on http://127.0.0.1:%d/", self.actual_port)
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -1715,14 +1748,29 @@ class WidgetServer:
         data = body.get("config") if "config" in body else body
         if not isinstance(data, dict):
             raise ValueError("expected {'config': {...}} or plain {...}")
+        # Snapshot fields that affect cached model state so we can hot-reload.
+        prev_fast_fw = _snapshot_fw(self._cfg.fast.fw)
+        prev_hq_fw = _snapshot_fw(self._cfg.hq.fw)
         apply_dict_to_config(self._cfg, data)
         path = save_runtime_config(self._cfg)
         logger.info("config updated and saved to %s", path)
-        return {
-            "saved": path,
-            "note": ("restart_required: changes to model / device / window "
-                     "sizes / preprocessor take effect on next launch"),
-        }
+        # Hot-reload any transcribers whose fw config materially changed.
+        reloaded: list[str] = []
+        fast_tr = self._stats_modules.get("transcriber.fast")
+        if fast_tr is not None and _fw_changed(prev_fast_fw, self._cfg.fast.fw):
+            fast_tr.invalidate_model()
+            reloaded.append("fast")
+        hq_tr = self._stats_modules.get("transcriber.hq")
+        if hq_tr is not None and _fw_changed(prev_hq_fw, self._cfg.hq.fw):
+            hq_tr.invalidate_model()
+            reloaded.append("hq")
+        if reloaded:
+            note = (f"applied · reloading model on next window: "
+                    f"{', '.join(reloaded)} (other fields may still require restart)")
+        else:
+            note = ("saved · changes to window sizes / preprocessor / device "
+                    "still require restart")
+        return {"saved": path, "note": note, "reloaded": reloaded}
 
     def _build_snapshot(self) -> dict:
         now_ms = self._clock.now_accepted_ms()

@@ -41,7 +41,7 @@ import webrtcvad
 from .clock import AcceptedClock, next_seq
 from .event_bus import EventBus
 from .runtime_config import AudioCaptureConfig, PreprocessorConfig
-from .types import AcceptedAudioSegment, Event, TOPIC_AUDIO_SILENCE
+from .types import AcceptedAudioSegment, Event, TOPIC_AUDIO_SILENCE, TOPIC_USER_ACTIONS
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,14 @@ class AudioPreprocessor(AcceptedClock):
             maxsize=raw_input_q_maxsize,
         )
         self._thread: Optional[threading.Thread] = None
+
+        # Mute gate. While muted, incoming PCM is discarded (no VAD, no
+        # admit, no segment emit, _accepted_ms frozen) but _real_ms_processed
+        # still advances so stamp_accepted_ms doesn't block. The first
+        # mute_toggle sets this True; the next clears it.
+        self._muted = False
+        self._mute_lock = threading.Lock()
+        self._actions_sub = None
 
         logger.info(
             "AudioPreprocessor initialized "
@@ -182,13 +190,47 @@ class AudioPreprocessor(AcceptedClock):
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._actions_sub = self._bus.subscribe(
+            TOPIC_USER_ACTIONS, self._on_action, name="preprocessor.user_actions",
+        )
         self._thread = threading.Thread(
             target=self._loop, name="AudioPreprocessor", daemon=True,
         )
         self._thread.start()
         logger.info("AudioPreprocessor.start")
 
+    def set_muted(self, muted: bool) -> None:
+        with self._mute_lock:
+            if self._muted == muted:
+                return
+            self._muted = muted
+            if muted:
+                # Drop straddling speech so it doesn't bleed across the
+                # mute boundary, and re-seed the VAD gate as all-silence
+                # so unmute starts from a clean state.
+                self._residual.clear()
+                self._gate_history.extend(
+                    [False] * self._gate_history.maxlen
+                )
+                self._armed = False
+                self._dropped_run_frames = 0
+                self._silence_run_real_ms = 0
+        logger.info("AudioPreprocessor.muted=%s", muted)
+
+    def _on_action(self, ev: Event) -> None:
+        if ev.payload.get("action") != "mute_toggle":
+            return
+        with self._mute_lock:
+            target = not self._muted
+        self.set_muted(target)
+
     def shutdown(self) -> None:
+        if self._actions_sub is not None:
+            try:
+                self._actions_sub.shutdown()
+            except Exception:
+                logger.exception("preprocessor actions_sub.shutdown failed")
+            self._actions_sub = None
         if self._thread is None:
             return
         # The worker loop checks _stop on every iteration. Push a None
@@ -229,6 +271,17 @@ class AudioPreprocessor(AcceptedClock):
         # audio (computed from byte length, not the ts argument — that way
         # short reads from PyAudio account correctly).
         chunk_real_ms = (len(pcm) // BYTES_PER_SAMPLE) * 1000 // self._sample_rate
+
+        with self._mute_lock:
+            muted = self._muted
+        if muted:
+            # Drop PCM entirely: no VAD, no admit, accepted_ms frozen, no
+            # segments. Still advance real_ms_processed so stamp_accepted_ms
+            # doesn't block on presses that occur during mute.
+            with self._catch_up:
+                self._real_ms_processed += chunk_real_ms
+                self._catch_up.notify_all()
+            return
 
         self._residual.extend(pcm)
 

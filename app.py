@@ -308,6 +308,25 @@ def _apply_env(cfg: RuntimeConfig) -> None:
         os.environ["HF_HUB_OFFLINE"] = "1"
 
 
+def _startup_extras(cfg: RuntimeConfig, session_dir: str) -> list[tuple[str, str]]:
+    keys = cfg.hotkeys.keys
+    hotkey_parts = [
+        f"{keys.get('toggle_recording', 'r')}×2 record",
+        f"{keys.get('toggle_aside', 'a')}×2 aside",
+        f"{keys.get('discard_recording', 'x')}×2 discard",
+        "m×2 mute",
+        "q×2 quit",
+    ]
+    models = f"fast={cfg.fast.fw.model}"
+    if cfg.hq.enabled:
+        models += f", hq={cfg.hq.fw.model}"
+    return [
+        ("session", session_dir),
+        ("models", models),
+        ("hotkeys", "  ".join(hotkey_parts)),
+    ]
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="voice_dictation entry point")
     parser.add_argument("--selftest", action="store_true")
@@ -344,7 +363,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             if args.widget:
                 port = app.widget.actual_port if app.widget else 0
                 from .widget_server import _print_url_banner
-                _print_url_banner("widget", f"http://127.0.0.1:{port}/")
+                _print_url_banner(
+                    "widget",
+                    f"http://127.0.0.1:{port}/",
+                    extras=_startup_extras(cfg, session_dir),
+                )
                 logger.info("Ctrl-C to exit")
                 signal.signal(signal.SIGINT, lambda *_: app.stop.set())
                 app.stop.wait()
@@ -356,7 +379,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             time.sleep(args.duration)
         else:
             signal.signal(signal.SIGINT, lambda *_: app.stop.set())
-            logger.info("recording — press Ctrl-C or double-tap Q to stop")
+            from .widget_server import _print_url_banner
+            port = app.widget.actual_port if app.widget else 0
+            _print_url_banner(
+                "widget",
+                f"http://127.0.0.1:{port}/",
+                extras=_startup_extras(cfg, session_dir),
+            )
+            logger.info("recording — Ctrl-C or double-tap Q to stop")
             app.stop.wait()
         return 0
     finally:

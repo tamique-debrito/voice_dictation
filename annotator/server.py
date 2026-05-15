@@ -476,6 +476,9 @@ html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
   color: #8de28d; background: #1a3a1a; text-decoration: underline;
   padding: 0 1px; border-radius: 2px;
 }
+.seg .source .word { cursor: pointer; }
+.seg .source .word:hover { background: #2c3340; }
+.seg .source del .word:hover { background: #4a1f1f; }
 .seg .edit-cell { padding: 6px 8px; }
 .seg .edit {
   width: 100%; padding: 4px 8px; line-height: 18px;
@@ -666,43 +669,87 @@ function autoSize(ta) {
   ta.style.height = h + "px";
 }
 
-function wordDiff(a, b) {
-  const ta = a.split(/(\s+)/);
-  const tb = b.split(/(\s+)/);
-  const m = ta.length, n = tb.length;
+// Tokenize edit text into bare words (no whitespace) for LCS matching.
+function editWords(s) {
+  const m = (s || "").match(/\S+/g);
+  return m || [];
+}
+
+// Normalize for compare: strip non-alphanumerics so "Hello," matches "hello".
+function wnorm(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// Word-level diff over source `words` ({text, start_accepted_ms}) vs the
+// raw edited string, returning ops with timestamps attached to source-side
+// words so the renderer can build clickable spans.
+//   ops: ["=", text, ms]   kept source word (clickable)
+//        ["-", text, ms]   deleted source word (still clickable)
+//        ["+", text]       inserted edit-side word (no timestamp)
+function wordDiffWithTs(sourceWords, editText) {
+  const a = sourceWords.map(w => ({raw: (w.text || "").trim(),
+                                   key: wnorm(w.text), ms: w.start_accepted_ms}));
+  const b = editWords(editText).map(t => ({raw: t, key: wnorm(t)}));
+  const m = a.length, n = b.length;
   const dp = Array(m + 1);
   for (let i = 0; i <= m; i++) dp[i] = new Int32Array(n + 1);
   for (let i = m - 1; i >= 0; i--) {
     for (let j = n - 1; j >= 0; j--) {
-      if (ta[i] === tb[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      if (a[i].key && a[i].key === b[j].key) dp[i][j] = dp[i + 1][j + 1] + 1;
       else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
   const ops = [];
   let i = 0, j = 0;
   while (i < m && j < n) {
-    if (ta[i] === tb[j]) { ops.push(["=", ta[i]]); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(["-", ta[i]]); i++; }
-    else { ops.push(["+", tb[j]]); j++; }
+    if (a[i].key && a[i].key === b[j].key) {
+      // Show the original source casing/punctuation, not the edit's.
+      ops.push(["=", a[i].raw, a[i].ms]);
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push(["-", a[i].raw, a[i].ms]); i++;
+    } else {
+      ops.push(["+", b[j].raw]); j++;
+    }
   }
-  while (i < m) { ops.push(["-", ta[i]]); i++; }
-  while (j < n) { ops.push(["+", tb[j]]); j++; }
-  const out = [];
-  for (const [op, tok] of ops) {
-    if (out.length && out[out.length - 1][0] === op) out[out.length - 1][1] += tok;
-    else out.push([op, tok]);
-  }
-  return out;
+  while (i < m) { ops.push(["-", a[i].raw, a[i].ms]); i++; }
+  while (j < n) { ops.push(["+", b[j].raw]); j++; }
+  return ops;
 }
 
-function renderDiff(source, edit) {
-  if (source === edit) return esc(source);
-  const ops = wordDiff(source, edit);
-  return ops.map(([op, tok]) => {
-    if (op === "=") return esc(tok);
-    if (op === "-") return "<del>" + esc(tok) + "</del>";
-    return "<ins>" + esc(tok) + "</ins>";
-  }).join("");
+function renderDiffClickable(sourceWords, editText) {
+  // No source words → fall back to plain escaped source text (no link).
+  if (!sourceWords || !sourceWords.length) return esc(editText || "");
+  const ops = wordDiffWithTs(sourceWords, editText || "");
+  const parts = [];
+  let prev = null;       // "=" | "-" | "+" | null
+  for (const op of ops) {
+    const kind = op[0];
+    // Open/close <del>/<ins> wrappers when op kind changes.
+    if (kind !== prev) {
+      if (prev === "-") parts.push("</del>");
+      else if (prev === "+") parts.push("</ins>");
+      if (kind === "-") parts.push("<del>");
+      else if (kind === "+") parts.push("<ins>");
+    }
+    if (kind === "+") {
+      parts.push(" " + esc(op[1]));
+    } else {
+      // = or -: clickable source word with its timestamp.
+      const ms = op[2];
+      parts.push(' <span class="word" data-ms="' + ms + '">' +
+                 esc(op[1]) + '</span>');
+    }
+    prev = kind;
+  }
+  if (prev === "-") parts.push("</del>");
+  else if (prev === "+") parts.push("</ins>");
+  // Strip the leading space introduced by the first token.
+  let out = parts.join("");
+  if (out.startsWith(" ")) out = out.slice(1);
+  // Spaces immediately after an opening tag look weird; tidy them.
+  out = out.replace(/(<(?:del|ins)>) /g, "$1");
+  return out;
 }
 
 function renderSegments() {
@@ -731,7 +778,7 @@ function renderSegments() {
     div.innerHTML = `
       <div class="ts" title="seek to ${startSec.toFixed(2)}s${s.boundary ? ' · boundary:' + s.boundary : ''}">${fmtMs(s.start_accepted_ms - c.start_accepted_ms)}</div>
       <div class="accent"></div>
-      <div class="source">${renderDiff(s.text || "", currentText)}</div>
+      <div class="source">${renderDiffClickable(s.words || [], currentText)}</div>
       <div class="edit-cell"><textarea class="edit" rows="1" spellcheck="false">${esc(currentText)}</textarea></div>
       <div class="status-dot"></div>`;
     const ts = div.querySelector(".ts");
@@ -742,7 +789,7 @@ function renderSegments() {
       autoSize(ta);
       const isModified = ta.value.trim() !== (s.text || "").trim();
       div.classList.toggle("modified", isModified);
-      sourceCell.innerHTML = renderDiff(s.text || "", ta.value);
+      sourceCell.innerHTML = renderDiffClickable(s.words || [], ta.value);
     });
     ta.addEventListener("blur", () => maybeSaveOnBlur(s, div, ta));
     el.appendChild(div);
@@ -818,6 +865,18 @@ function switchSession(delta) {
 }
 
 $("#reject-btn").onclick = toggleReject;
+
+// Delegated click → seek to a source word's timestamp.
+$("#segments").addEventListener("click", (e) => {
+  const w = e.target.closest(".word");
+  if (!w) return;
+  const ms = parseInt(w.dataset.ms, 10);
+  if (!isFinite(ms)) return;
+  const c = state.chunks[state.active]; if (!c) return;
+  const p = $("#player");
+  p.currentTime = Math.max(0, (ms - c.start_accepted_ms) / 1000);
+  p.play();
+});
 
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" ||
