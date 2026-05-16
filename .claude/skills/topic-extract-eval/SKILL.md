@@ -12,15 +12,17 @@ A scaffold for prompt-engineering iteration: given the voice-dictation transcrip
 
 ```
 voice_dictation/llm_eval/
-├── prompts/                            # prompt templates (markdown w/ {input})
-│   ├── per_transcript_v1.md
-│   ├── aggregate_v1.md
-│   └── ... (add new versions as v2, v3 ...)
-├── runs/                               # outputs go here
-│   ├── per_transcript_v1__<model>__<transcript>.md
-│   └── aggregate_v1__<model>.md
-└── ground_truth.md                     # human-curated reference (copied or symlinked
-                                         # from scratch/llm_eval/ground_truth.md)
+├── prompts/
+│   ├── per_transcript.md         # current stable (committed)
+│   ├── aggregate.md              # current stable (committed)
+│   └── wip/                      # iteration sandbox (gitignored)
+│       ├── per_transcript_v1.md  # archived versions for diff/history
+│       ├── per_transcript_v2.md
+│       └── ...
+├── runs/                         # eval outputs (gitignored)
+│   └── <phase>_<prompt-ver>__<model>__<transcript>.md
+├── ITERATION_NOTES.md            # running log of what was tried + results
+└── ground_truth.md               # human-curated reference (symlink → scratch/llm_eval/)
 ```
 
 Transcripts live at `scratch/transcripts_text/` (built by `voice_dictation/tools/export_transcripts.py` + a one-off v1 dump script — see the parent `voice-dictation-finetune` skill for context).
@@ -46,7 +48,7 @@ Available models (see `local_llm_tests/models.yaml`): `llama3.1:8b-instruct-q4_K
 
 ```bash
 python -m voice_dictation.tools.llm_eval \
-    --prompt   voice_dictation/llm_eval/prompts/per_transcript_v1.md \
+    --prompt   voice_dictation/llm_eval/prompts/per_transcript.md \
     --input    scratch/transcripts_text/regen_20260515_193718_p64371_20260514_160743_audio.txt \
     --model    llama3.1:8b-instruct-q4_K_M \
     --num-ctx  8192 \
@@ -72,9 +74,9 @@ Output file includes a header (model, prompt, timing, token counts) followed by 
 The benchmark set is the 7–8 transcripts named in `ground_truth.md` Section 2. Run the current prompt against each:
 
 ```bash
-PROMPT=voice_dictation/llm_eval/prompts/per_transcript_v1.md
+PROMPT=voice_dictation/llm_eval/prompts/per_transcript.md
 MODEL=llama3.1:8b-instruct-q4_K_M
-TAG=p1_v1__llama31
+TAG=p1__llama31  # bump tag when iterating on the prompt
 
 # Extract benchmark filenames from ground_truth.md (lines like "#### `xxx.txt`")
 grep -oE '#### \`[^`]+\.txt`' voice_dictation/llm_eval/ground_truth.md \
@@ -97,7 +99,7 @@ Spot-check by eye, OR have a stronger LLM grade the outputs. A quick eyeball com
 # Side-by-side for one transcript
 diff -y --width=200 \
     <(sed -n '/^#### \`regen_X/,/^####/p' voice_dictation/llm_eval/ground_truth.md) \
-    voice_dictation/llm_eval/runs/p1_v1__llama31__regen_X.md
+    voice_dictation/llm_eval/runs/p1__llama31__regen_X.md
 ```
 
 Things to grade on:
@@ -114,23 +116,31 @@ Feed the Phase-1 outputs (the substantive ones; ignore the "no significant conte
 
 ```bash
 python -m voice_dictation.tools.llm_eval \
-    --prompt   voice_dictation/llm_eval/prompts/aggregate_v1.md \
-    --input    voice_dictation/llm_eval/runs/p1_v1__llama31__regen_*.md \
+    --prompt   voice_dictation/llm_eval/prompts/aggregate.md
+│   └── wip/                            # iteration sandbox (gitignored)
+│       └── ... \
+    --input    voice_dictation/llm_eval/runs/p1__llama31__regen_*.md \
     --model    llama3.1:8b-instruct-q4_K_M \
     --num-ctx  16384 \
-    --output   voice_dictation/llm_eval/runs/p2_v1__llama31.md
+    --output   voice_dictation/llm_eval/runs/p2__llama31.md
 ```
 
 Compare against `ground_truth.md` Section 1.
 
 ## Iterating prompts
 
-When something doesn't work, copy the prompt to a new version:
+**Read `voice_dictation/llm_eval/ITERATION_NOTES.md` first** — it tracks what's been tried, what worked, and the open problems. Append to it after each iteration cycle. The notes file is committed; the run outputs and wip prompts aren't.
+
+When iterating, copy the current stable prompt into `prompts/wip/`:
 
 ```bash
-cp voice_dictation/llm_eval/prompts/per_transcript_v1.md \
-   voice_dictation/llm_eval/prompts/per_transcript_v2.md
-# edit v2, then re-run Step 3 with the new prompt, distinct output tag.
+cp voice_dictation/llm_eval/prompts/per_transcript.md \
+   voice_dictation/llm_eval/prompts/wip/per_transcript_v3.md
+# edit wip/per_transcript_v3.md, run Step 3 with --prompt pointing to it,
+# distinct output tag. When clearly better:
+cp voice_dictation/llm_eval/prompts/wip/per_transcript_v3.md \
+   voice_dictation/llm_eval/prompts/per_transcript.md
+# then add a row to ITERATION_NOTES.md summarising the delta.
 ```
 
 Common things that help small-LLM prompts:
