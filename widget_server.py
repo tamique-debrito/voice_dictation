@@ -101,6 +101,40 @@ def _print_url_banner(label: str, url: str, extras: list[tuple[str, str]] | None
         pass
 
 
+def print_closing_banner(extras: list[tuple[str, str]]) -> None:
+    """Print a high-visibility banner on shutdown.
+
+    Mirrors the startup banner format but without a URL header — used so the
+    session dir (and any other pointers) stays visible at the end of the run
+    rather than scrolling away with the closing log lines.
+    """
+    stream = sys.stderr
+    is_tty = False
+    try:
+        is_tty = stream.isatty()
+    except Exception:
+        is_tty = False
+    if not extras:
+        return
+    header = "session ended"
+    plain_lines = [header] + [f"{k}: {v}" for k, v in extras]
+    width = max(len(s) for s in plain_lines) + 4
+    if is_tty:
+        bar = "\x1b[1;36m" + "─" * width + "\x1b[0m"
+        header_line = f"  \x1b[1m{header}\x1b[0m"
+        extra_lines = [f"  \x1b[1m{k}\x1b[0m: {v}" for k, v in extras]
+    else:
+        bar = "─" * width
+        header_line = f"  {header}"
+        extra_lines = [f"  {k}: {v}" for k, v in extras]
+    body = "\n".join([bar, header_line, *extra_lines, bar])
+    try:
+        stream.write(f"\n{body}\n")
+        stream.flush()
+    except Exception:
+        pass
+
+
 _INDEX_HTML = r"""<!doctype html>
 <html lang="en">
 <head>

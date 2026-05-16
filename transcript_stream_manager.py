@@ -37,7 +37,7 @@ from typing import Optional
 from .clock import AcceptedClock, next_seq
 from .event_bus import EventBus
 from .types import (
-    Event, Segment, WindowCompletion,
+    Event, Segment, WindowCompletion, Word,
     TOPIC_PASTE_ACTIONS, TOPIC_TRANSCRIPT_CANONICAL, TOPIC_USER_ACTIONS,
 )
 
@@ -419,7 +419,9 @@ class TranscriptStreamManager:
 
     def _merge_fast_and_hq(self) -> list[Segment]:
         """Return Fast + HQ segments merged with HQ preferred wherever it
-        overlaps. Same merge rule as ``get_canonical_tail``."""
+        overlaps. Fast segments that only partially overlap an HQ range are
+        word-trimmed (not dropped whole) so the non-HQ-covered portion is
+        preserved until HQ catches up."""
         fast_segs = self._fast.snapshot()
         hq_segs = self._hq.snapshot()
         if not hq_segs:
@@ -428,17 +430,72 @@ class TranscriptStreamManager:
             (s.content_accepted_ms_start, s.content_accepted_ms_end)
             for s in hq_segs
         ]
+        kept_fast = self._subtract_hq_from_fast(fast_segs, hq_ranges)
+        merged = kept_fast + list(hq_segs)
+        merged.sort(key=lambda s: (s.content_accepted_ms_start, s.window_id))
+        return merged
 
-        def _overlaps_hq(s: Segment) -> bool:
+    @staticmethod
+    def _subtract_hq_from_fast(
+        fast_segs: list[Segment],
+        hq_ranges: list[tuple[int, int]],
+    ) -> list[Segment]:
+        """Trim each Fast segment against HQ-covered ranges.
+
+        - No overlap → keep the fast segment unchanged.
+        - Full coverage → drop.
+        - Partial coverage → split the fast segment into contiguous runs of
+          words whose midpoints fall outside every HQ range, emitting one
+          Segment per run with reconstructed text and time bounds.
+        - No word timings → fall back to drop-on-any-overlap (can't trim).
+        """
+        if not hq_ranges:
+            return list(fast_segs)
+
+        def _word_covered(w: Word) -> bool:
+            mid = (w.start_accepted_ms + w.end_accepted_ms) // 2
+            for a, b in hq_ranges:
+                if a <= mid < b:
+                    return True
+            return False
+
+        def _seg_overlaps(s: Segment) -> bool:
             for a, b in hq_ranges:
                 if s.content_accepted_ms_end > a and s.content_accepted_ms_start < b:
                     return True
             return False
 
-        kept_fast = [s for s in fast_segs if not _overlaps_hq(s)]
-        merged = kept_fast + list(hq_segs)
-        merged.sort(key=lambda s: (s.content_accepted_ms_start, s.window_id))
-        return merged
+        out: list[Segment] = []
+        for s in fast_segs:
+            if not _seg_overlaps(s):
+                out.append(s)
+                continue
+            if not s.words:
+                continue
+            run: list[Word] = []
+
+            def _flush() -> None:
+                if not run:
+                    return
+                text = "".join(w.text for w in run).strip()
+                if text:
+                    out.append(Segment(
+                        text=text,
+                        content_accepted_ms_start=run[0].start_accepted_ms,
+                        content_accepted_ms_end=run[-1].end_accepted_ms,
+                        words=list(run),
+                        window_id=s.window_id,
+                        ends_on_marker_idx=s.ends_on_marker_idx,
+                    ))
+                run.clear()
+
+            for w in s.words:
+                if _word_covered(w):
+                    _flush()
+                else:
+                    run.append(w)
+            _flush()
+        return out
 
     @staticmethod
     def _concat_in_range(
@@ -539,20 +596,14 @@ class TranscriptStreamManager:
             key=lambda s: (s.content_accepted_ms_start, s.window_id),
         )
 
-        # HQ coverage: HQ wins over any fast segment whose range overlaps
-        # a HQ segment. Build a list of HQ time ranges to test against.
+        # HQ coverage: HQ wins wherever it covers. Partially-overlapping
+        # fast segments are word-trimmed (not dropped) so the non-covered
+        # portion remains visible until HQ catches up.
         hq_ranges = [
             (s.content_accepted_ms_start, s.content_accepted_ms_end)
             for s in hq_segs
         ]
-
-        def _overlaps_hq(s: Segment) -> bool:
-            for a, b in hq_ranges:
-                if s.content_accepted_ms_end > a and s.content_accepted_ms_start < b:
-                    return True
-            return False
-
-        kept_fast = [s for s in fast_segs if not _overlaps_hq(s)]
+        kept_fast = self._subtract_hq_from_fast(fast_segs, hq_ranges)
         merged = sorted(
             [(s, "fast") for s in kept_fast] + [(s, "hq") for s in hq_segs],
             key=lambda it: (it[0].content_accepted_ms_start, it[0].window_id),
