@@ -391,6 +391,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     finally:
         app.shutdown()
+        if not args.selftest:
+            from .widget_server import print_closing_banner
+            print_closing_banner([("session", session_dir)])
 
 
 if __name__ == "__main__":

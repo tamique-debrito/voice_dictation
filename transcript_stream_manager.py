@@ -37,12 +37,20 @@ from typing import Optional
 from .clock import AcceptedClock, next_seq
 from .event_bus import EventBus
 from .types import (
-    Event, Segment, WindowCompletion,
+    Event, Segment, WindowCompletion, Word,
     TOPIC_PASTE_ACTIONS, TOPIC_TRANSCRIPT_CANONICAL, TOPIC_USER_ACTIONS,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
 
 
 @dataclass
@@ -55,6 +63,26 @@ class _PendingPaste:
     received_at_accepted_ms: int
     is_aside: bool = False
     exclude_intervals: list[tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
+class _LiveStream:
+    """State for a single active live-stream recording.
+
+    ``last_emitted_text`` is what we've actually keystroked to the OS so
+    far. On every transcription update we recompute the canonical window
+    text and emit a (backspaces, append) edit to converge on it.
+    """
+
+    start_press_idx: int
+    start_accepted_ms: int
+    last_emitted_text: str = ""
+    aside_intervals: list[tuple[int, int]] = field(default_factory=list)
+    open_aside_start_ms: Optional[int] = None
+    # Set when the user double-tap-closes the live stream. Once the
+    # watermark covers this end, we do one final emit and clear state.
+    pending_end_ms: Optional[int] = None
+    pending_end_press_idx: Optional[int] = None
 
 
 @dataclass
@@ -111,6 +139,10 @@ class TranscriptStreamManager:
         self._pending: list[_PendingPaste] = []
         self._pending_lock = threading.Lock()
         self._paste_seq = 0
+
+        # Single-active live-stream window (only one open at a time).
+        self._live: Optional[_LiveStream] = None
+        self._live_lock = threading.Lock()
 
         self._actions_sub = None
         self._fast_thread: Optional[threading.Thread] = None
@@ -185,6 +217,7 @@ class TranscriptStreamManager:
                 # in this same thread (queue order).
                 self._advance_watermark(buf.label, item.end_accepted_ms)
                 self._maybe_complete_pending()
+                self._maybe_live_emit()
                 continue
             # Real segment.
             buf.add(item)
@@ -205,6 +238,7 @@ class TranscriptStreamManager:
                 },
             ))
             self._maybe_complete_pending()
+            self._maybe_live_emit()
 
     def stats(self) -> dict:
         with self._wm_lock:
@@ -237,6 +271,70 @@ class TranscriptStreamManager:
 
     def _on_action(self, ev: Event) -> None:
         action = ev.payload.get("action")
+        is_live = bool(ev.payload.get("is_live_stream", False))
+        # Live-stream open: stash state and return — no pending paste.
+        if action == "recording_started" and is_live:
+            with self._live_lock:
+                self._live = _LiveStream(
+                    start_press_idx=ev.payload["start_press_idx"],
+                    start_accepted_ms=ev.payload["start_accepted_ms"],
+                )
+            logger.info("live-stream opened (start=%dms)",
+                        ev.payload["start_accepted_ms"])
+            return
+        # Aside opened during a live stream: pause emit.
+        if action == "aside_started":
+            with self._live_lock:
+                if self._live is not None:
+                    self._live.open_aside_start_ms = ev.payload[
+                        "start_accepted_ms"
+                    ]
+                    return
+            return
+        # Aside ended: if a live stream is active, fold the interval into
+        # the exclude list and resume — do NOT queue a separate paste for
+        # the aside (live-mode asides are silently dropped).
+        if action == "aside_ended":
+            handled_by_live = False
+            with self._live_lock:
+                if self._live is not None:
+                    self._live.aside_intervals.append((
+                        ev.payload["start_accepted_ms"],
+                        ev.payload["end_accepted_ms"],
+                    ))
+                    self._live.open_aside_start_ms = None
+                    handled_by_live = True
+            if handled_by_live:
+                self._maybe_live_emit()
+                return
+            # Fall through to normal aside paste below.
+        # Discard during a live stream: backspace everything we emitted.
+        if action == "cancel":
+            with self._live_lock:
+                live = self._live
+                self._live = None
+            if live is not None:
+                n = len(live.last_emitted_text)
+                if n > 0:
+                    self._emit_stream(
+                        backspaces=n, text="",
+                        start_press_idx=live.start_press_idx,
+                    )
+                logger.info("live-stream cancelled (backspaced %d chars)", n)
+            return
+        # Live-stream close (double-tap after triple-tap-open): mark a
+        # pending end on the live state; final emit happens when the
+        # watermark covers end_ms. Do NOT queue a normal paste.
+        if action == "paste_window_complete" and is_live:
+            with self._live_lock:
+                if self._live is not None:
+                    self._live.pending_end_ms = ev.payload["end_accepted_ms"]
+                    self._live.pending_end_press_idx = ev.payload[
+                        "end_press_idx"
+                    ]
+            self._maybe_live_emit()
+            return
+
         if action not in ("paste_window_complete", "aside_ended"):
             return
         self._paste_seq += 1
@@ -284,35 +382,120 @@ class TranscriptStreamManager:
         """Return paste text if the manager has processed every audio
         block up to ``w.end_accepted_ms`` (within tolerance), else None.
 
-        Watermark rule:
-          - if hq_up_to + tol >= end → use HQ text in range (higher quality)
-          - elif fast_up_to + tol >= end → use FAST text in range
-          - else None (wait for more progress; or force=True at shutdown)
-        ``hq_up_to`` typically lags fast by a lot, so most live pastes
-        come from fast.
+        Watermark rule (gate only — the actual text computation is the
+        shared ``_compute_window_text`` path, which lets a single
+        recompute function serve both regular and live-stream pastes):
+          - fast_up_to + tol >= end → fire; ``_compute_window_text``
+            internally prefers HQ where HQ has caught up, Fast elsewhere.
+          - else None (wait for more progress; or force=True at shutdown).
         """
         with self._wm_lock:
             fast_up = self._fast_up_to
-            hq_up = self._hq_up_to
         end = w.end_accepted_ms
         tol = self._tolerance_ms
-        if hq_up + tol >= end:
-            return self._concat_in_range(
-                self._hq.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
-            )
-        if fast_up + tol >= end:
-            return self._concat_in_range(
-                self._fast.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
-            )
-        if force:
-            # Shutdown — emit whatever's available, preferring fast over hq
-            # for completeness (fast typically has more coverage live).
-            return self._concat_in_range(
-                self._fast.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
-            ) or self._concat_in_range(
-                self._hq.snapshot(), w.start_accepted_ms, end, w.exclude_intervals,
+        if fast_up + tol >= end or force:
+            return self._compute_window_text(
+                w.start_accepted_ms, end, w.exclude_intervals,
             )
         return None
+
+    def _compute_window_text(
+        self,
+        start_ms: int,
+        end_ms: int,
+        exclude: list[tuple[int, int]] | None = None,
+    ) -> str:
+        """Single source of truth for "what text covers this window?"
+
+        Builds a merged segment list — HQ wins wherever it overlaps a
+        Fast segment, Fast fills the rest — then concatenates with the
+        same word-level trimming and exclude logic used for completed
+        pastes. The function is intentionally state-independent: callers
+        (both the watermark-gated paste path and the live-stream recompute)
+        get exactly the same answer for the same args.
+        """
+        merged = self._merge_fast_and_hq()
+        return self._concat_in_range(merged, start_ms, end_ms, exclude)
+
+    def _merge_fast_and_hq(self) -> list[Segment]:
+        """Return Fast + HQ segments merged with HQ preferred wherever it
+        overlaps. Fast segments that only partially overlap an HQ range are
+        word-trimmed (not dropped whole) so the non-HQ-covered portion is
+        preserved until HQ catches up."""
+        fast_segs = self._fast.snapshot()
+        hq_segs = self._hq.snapshot()
+        if not hq_segs:
+            return list(fast_segs)
+        hq_ranges = [
+            (s.content_accepted_ms_start, s.content_accepted_ms_end)
+            for s in hq_segs
+        ]
+        kept_fast = self._subtract_hq_from_fast(fast_segs, hq_ranges)
+        merged = kept_fast + list(hq_segs)
+        merged.sort(key=lambda s: (s.content_accepted_ms_start, s.window_id))
+        return merged
+
+    @staticmethod
+    def _subtract_hq_from_fast(
+        fast_segs: list[Segment],
+        hq_ranges: list[tuple[int, int]],
+    ) -> list[Segment]:
+        """Trim each Fast segment against HQ-covered ranges.
+
+        - No overlap → keep the fast segment unchanged.
+        - Full coverage → drop.
+        - Partial coverage → split the fast segment into contiguous runs of
+          words whose midpoints fall outside every HQ range, emitting one
+          Segment per run with reconstructed text and time bounds.
+        - No word timings → fall back to drop-on-any-overlap (can't trim).
+        """
+        if not hq_ranges:
+            return list(fast_segs)
+
+        def _word_covered(w: Word) -> bool:
+            mid = (w.start_accepted_ms + w.end_accepted_ms) // 2
+            for a, b in hq_ranges:
+                if a <= mid < b:
+                    return True
+            return False
+
+        def _seg_overlaps(s: Segment) -> bool:
+            for a, b in hq_ranges:
+                if s.content_accepted_ms_end > a and s.content_accepted_ms_start < b:
+                    return True
+            return False
+
+        out: list[Segment] = []
+        for s in fast_segs:
+            if not _seg_overlaps(s):
+                out.append(s)
+                continue
+            if not s.words:
+                continue
+            run: list[Word] = []
+
+            def _flush() -> None:
+                if not run:
+                    return
+                text = "".join(w.text for w in run).strip()
+                if text:
+                    out.append(Segment(
+                        text=text,
+                        content_accepted_ms_start=run[0].start_accepted_ms,
+                        content_accepted_ms_end=run[-1].end_accepted_ms,
+                        words=list(run),
+                        window_id=s.window_id,
+                        ends_on_marker_idx=s.ends_on_marker_idx,
+                    ))
+                run.clear()
+
+            for w in s.words:
+                if _word_covered(w):
+                    _flush()
+                else:
+                    run.append(w)
+            _flush()
+        return out
 
     @staticmethod
     def _concat_in_range(
@@ -413,20 +596,14 @@ class TranscriptStreamManager:
             key=lambda s: (s.content_accepted_ms_start, s.window_id),
         )
 
-        # HQ coverage: HQ wins over any fast segment whose range overlaps
-        # a HQ segment. Build a list of HQ time ranges to test against.
+        # HQ coverage: HQ wins wherever it covers. Partially-overlapping
+        # fast segments are word-trimmed (not dropped) so the non-covered
+        # portion remains visible until HQ catches up.
         hq_ranges = [
             (s.content_accepted_ms_start, s.content_accepted_ms_end)
             for s in hq_segs
         ]
-
-        def _overlaps_hq(s: Segment) -> bool:
-            for a, b in hq_ranges:
-                if s.content_accepted_ms_end > a and s.content_accepted_ms_start < b:
-                    return True
-            return False
-
-        kept_fast = [s for s in fast_segs if not _overlaps_hq(s)]
+        kept_fast = self._subtract_hq_from_fast(fast_segs, hq_ranges)
         merged = sorted(
             [(s, "fast") for s in kept_fast] + [(s, "hq") for s in hq_segs],
             key=lambda it: (it[0].content_accepted_ms_start, it[0].window_id),
@@ -483,6 +660,7 @@ class TranscriptStreamManager:
             emit_accepted_ms=self._clock.now_accepted_ms(),
             seq=next_seq(),
             payload={
+                "kind": "paste",
                 "paste_idx": w.paste_idx,
                 "start_press_idx": w.start_press_idx,
                 "end_press_idx": w.end_press_idx,
@@ -491,4 +669,92 @@ class TranscriptStreamManager:
                 "text": text,
                 "is_aside": w.is_aside,
             },
+        ))
+
+    # ------------------------------------------------------------------
+    # Live-stream output
+    # ------------------------------------------------------------------
+
+    def _maybe_live_emit(self) -> None:
+        """Recompute the current best text for the open live-stream window
+        and emit a (backspaces, append) edit to converge on it.
+
+        Called on every Fast or HQ segment ingestion AND on
+        WindowCompletion. The recompute is uniform across triggers —
+        whether a Fast or HQ segment arrived is irrelevant; we always
+        call ``_compute_window_text`` with the current snapshots. HQ
+        replacing Fast text in an already-emitted region falls out as
+        backspaces-and-rewrite for free.
+        """
+        with self._live_lock:
+            live = self._live
+            if live is None:
+                return
+            if live.open_aside_start_ms is not None:
+                # Aside is open — pause emit so the aside content doesn't
+                # leak into the stream while it's being recorded. We also
+                # avoid rewriting earlier text during this window; the
+                # aside range will be added to exclude on aside_ended,
+                # at which point any rewrites resume.
+                return
+            with self._wm_lock:
+                fast_up = self._fast_up_to
+            # Cap the recompute at the current Fast watermark so we don't
+            # emit text past the audio that's actually been transcribed.
+            # If a close is pending, the cap is min(watermark, pending_end).
+            end_cap = fast_up
+            if live.pending_end_ms is not None:
+                end_cap = min(end_cap, live.pending_end_ms)
+            new_text = self._compute_window_text(
+                live.start_accepted_ms, end_cap, list(live.aside_intervals),
+            )
+            old_text = live.last_emitted_text
+            if new_text == old_text and live.pending_end_ms is None:
+                return
+            common = _common_prefix_len(old_text, new_text)
+            backspaces = len(old_text) - common
+            appended = new_text[common:]
+            live.last_emitted_text = new_text
+            # Check whether the pending close has been fully covered; if
+            # so, emit this edit AND clear live state in one shot.
+            closing = (
+                live.pending_end_ms is not None
+                and fast_up + self._tolerance_ms >= live.pending_end_ms
+            )
+            start_press_idx = live.start_press_idx
+            final_text: Optional[str] = None
+            if closing:
+                logger.info(
+                    "live-stream closing (final emit, %d chars)",
+                    len(new_text),
+                )
+                final_text = new_text
+                self._live = None
+        if backspaces == 0 and not appended and final_text is None:
+            return
+        self._emit_stream(
+            backspaces=backspaces, text=appended,
+            start_press_idx=start_press_idx,
+            final_text=final_text,
+        )
+
+    def _emit_stream(self, *, backspaces: int, text: str,
+                     start_press_idx: int,
+                     final_text: Optional[str] = None) -> None:
+        payload: dict = {
+            "kind": "stream_edit",
+            "backspaces": backspaces,
+            "text": text,
+            "start_press_idx": start_press_idx,
+        }
+        if final_text is not None:
+            # Set on the closing edit so PasteExecutor can sync the
+            # system clipboard (regular pastes do this via pyperclip;
+            # streamed dictation otherwise leaves the clipboard untouched).
+            payload["final_text"] = final_text
+        self._bus.publish(Event(
+            topic=TOPIC_PASTE_ACTIONS,
+            emit_accepted_ms=self._clock.now_accepted_ms(),
+            seq=next_seq(),
+            payload=payload,
         ))

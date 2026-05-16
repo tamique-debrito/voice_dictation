@@ -10,7 +10,7 @@ import unittest
 from voice_dictation.event_bus import EventBus
 from voice_dictation.transcript_stream_manager import TranscriptStreamManager
 from voice_dictation.types import (
-    Event, Segment, WindowCompletion,
+    Event, Segment, WindowCompletion, Word,
     TOPIC_PASTE_ACTIONS, TOPIC_USER_ACTIONS,
 )
 
@@ -92,6 +92,50 @@ class TestTimestampCompletion(unittest.TestCase):
         fast_q.put(_seg("late hello", 0, 5200))
         _wait_for(lambda: len(pastes) >= 1)
         self.assertEqual(pastes[0].payload["text"], "late hello")
+        m.shutdown()
+        bus.shutdown()
+
+    def test_fast_tail_kept_when_hq_only_covers_prefix(self):
+        # Regression: when HQ has caught up partway through a fast segment,
+        # the non-HQ-covered tail of the fast segment used to be dropped
+        # entirely. The trim should keep those trailing words.
+        m, bus, _, fast_q, hq_q, pastes = _build(with_hq=True)
+        # Fast segment spans 0–4000 with per-word timings.
+        words = [
+            Word(text=" is", start_accepted_ms=0, end_accepted_ms=400),
+            Word(text=" a", start_accepted_ms=400, end_accepted_ms=800),
+            Word(text=" color", start_accepted_ms=800, end_accepted_ms=1600),
+            Word(text=" palette", start_accepted_ms=1600, end_accepted_ms=2400),
+            Word(text=" below", start_accepted_ms=2400, end_accepted_ms=3200),
+            Word(text=" colors", start_accepted_ms=3200, end_accepted_ms=4000),
+        ]
+        fast_q.put(Segment(
+            text="is a color palette below colors",
+            content_accepted_ms_start=0, content_accepted_ms_end=4000,
+            words=words, window_id=1,
+        ))
+        # HQ covers only the first half (0–1800), ending mid-segment.
+        hq_words = [
+            Word(text=" is", start_accepted_ms=0, end_accepted_ms=400),
+            Word(text=" a", start_accepted_ms=400, end_accepted_ms=800),
+            Word(text=" color...", start_accepted_ms=800, end_accepted_ms=1800),
+        ]
+        hq_q.put(Segment(
+            text="is a color...",
+            content_accepted_ms_start=0, content_accepted_ms_end=1800,
+            words=hq_words, window_id=1,
+        ))
+        time.sleep(0.05)
+        _publish_paste_window(
+            bus, start_press_idx=1, end_press_idx=2,
+            start_accepted_ms=0, end_accepted_ms=4000,
+        )
+        _wait_for(lambda: len(pastes) >= 1)
+        text = pastes[0].payload["text"]
+        # Must contain the words from the fast tail that HQ has NOT covered yet.
+        self.assertIn("palette", text)
+        self.assertIn("below", text)
+        self.assertIn("colors", text)
         m.shutdown()
         bus.shutdown()
 
