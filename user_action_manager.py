@@ -3,8 +3,10 @@
 Pipeline (live):
 
   pynput on_press
-   ├─ BareDoubleTap.feed(char)
-   │   └─ on_double_tap → _commit(char, real_ms)
+   ├─ BareMultiTap.feed(char)
+   │   ├─ on_double_tap   → _commit(char, real_ms, tap_count=2)
+   │   └─ on_triple_tap   → _commit(char, real_ms, tap_count=3)
+   │                        (only opens live-stream on the clipboard key)
    │       ├─ preprocessor.stamp_accepted_ms(real_ms) → content_accepted_ms
    │       ├─ allocate press_idx
    │       ├─ backspace-undo the two visible keystrokes
@@ -46,7 +48,7 @@ except Exception:  # pragma: no cover
 
 from .clock import AcceptedClock, next_seq
 from .event_bus import EventBus
-from .hotkeys import BareDoubleTap, key_char
+from .hotkeys import BareMultiTap, key_char
 from .runtime_config import HotkeyConfig, AppConfig
 from .types import Event, TOPIC_USER_PRESSES, TOPIC_USER_ACTIONS
 
@@ -107,8 +109,12 @@ class UserActionManager:
             | {self._clipboard_key, self._aside_key, self._discard_key}
             | {"q", "m", self._debug_flag_key}
         )
-        self._dt = BareDoubleTap(
-            window=1.0, keys=action_keys, on_double_tap=self._on_double_tap,
+        self._dt = BareMultiTap(
+            window=1.0,
+            keys=action_keys,
+            on_double_tap=self._on_double_tap,
+            on_triple_tap=self._on_triple_tap,
+            on_visual_cleanup=self._on_visual_cleanup,
         )
 
         self._real_clock = _SessionRealClock()
@@ -163,25 +169,52 @@ class UserActionManager:
         if char is not None:
             self._dt.feed(char)
 
+    def _on_visual_cleanup(self, char: str, n_visible: int) -> None:
+        # Backspace-out visible keystrokes synchronously on the listener
+        # thread so the typed chars don't sit on screen during the
+        # multi-tap disambiguation delay. Best-effort.
+        if self._kb is None:
+            return
+        try:
+            for _ in range(n_visible):
+                self._kb.tap(keyboard.Key.backspace)
+        except Exception:
+            logger.exception("backspace-undo failed")
+
     def _on_double_tap(self, char: str) -> None:
         real_ms = self._real_clock.now_ms()
-        # Backspace-out the two visible keystrokes; best-effort.
-        if self._kb is not None:
-            try:
-                self._kb.tap(keyboard.Key.backspace)
-                self._kb.tap(keyboard.Key.backspace)
-            except Exception:
-                logger.exception("backspace-undo failed")
-        self._commit(char, real_ms)
+        self._commit(char, real_ms, tap_count=2)
+
+    def _on_triple_tap(self, char: str) -> None:
+        # Only the clipboard key uses triple-tap (live-stream open). Other
+        # action keys ignore the third tap.
+        if char != self._clipboard_key:
+            return
+        real_ms = self._real_clock.now_ms()
+        self._commit(char, real_ms, tap_count=3)
 
     # ------------------------------------------------------------------
     # Press commit (test entry point)
     # ------------------------------------------------------------------
 
-    def _commit(self, char: str, real_ms: int) -> None:
-        """Commit a post-filter double-tap. Public for tests."""
+    def _commit(self, char: str, real_ms: int, tap_count: int = 2) -> None:
+        """Commit a post-filter multi-tap. Public for tests.
+
+        ``tap_count`` is 2 for a normal double-tap, 3 for a triple-tap of
+        the clipboard key (opens a live-stream recording). Triple-tap is
+        ignored if a recording is already open.
+        """
         action = self._resolve_action(char)
         if action is None:
+            return
+        if tap_count == 3 and (
+            action != "clipboard_toggle" or self._open_recording is not None
+        ):
+            # Triple-tap only opens a fresh live-stream recording. Either
+            # the key isn't the clipboard key, or we're already recording;
+            # fall through to ignore.
+            logger.debug("triple-tap ignored (char=%r open_rec=%s)",
+                         char, self._open_recording is not None)
             return
         accepted_ms = self._preprocessor.stamp_accepted_ms(real_ms)
         press_idx = next(self._press_seq)
@@ -205,12 +238,14 @@ class UserActionManager:
                 "real_ms": real_ms,
                 "content_accepted_ms": accepted_ms,
                 "is_clipboard_end": is_clipboard_end,
+                "tap_count": tap_count,
             },
         ))
         # Compose downstream actions.
         self._apply_state_machine(
             action=action, char=char, press_idx=press_idx,
             accepted_ms=accepted_ms, real_ms=real_ms,
+            tap_count=tap_count,
         )
 
     def _resolve_action(self, char: str) -> Optional[str]:
@@ -250,20 +285,24 @@ class UserActionManager:
         press_idx: int,
         accepted_ms: int,
         real_ms: int,
+        tap_count: int = 2,
     ) -> None:
         if action == "clipboard_toggle":
             if self._open_recording is None:
+                is_live_stream = (tap_count == 3)
                 self._open_recording = {
                     "start_press_idx": press_idx,
                     "start_accepted_ms": accepted_ms,
                     "start_real_ms": real_ms,
                     "asides": [],
+                    "is_live_stream": is_live_stream,
                 }
                 self._publish_action(
                     "recording_started",
                     {
                         "start_press_idx": press_idx,
                         "start_accepted_ms": accepted_ms,
+                        "is_live_stream": is_live_stream,
                     },
                     accepted_ms,
                 )
@@ -298,6 +337,7 @@ class UserActionManager:
                         "start_accepted_ms": rec["start_accepted_ms"],
                         "end_accepted_ms": accepted_ms,
                         "aside_intervals": rec["asides"],
+                        "is_live_stream": rec.get("is_live_stream", False),
                     },
                     accepted_ms,
                 )
@@ -342,6 +382,7 @@ class UserActionManager:
                         "discard_press_idx": press_idx,
                         "start_accepted_ms": rec["start_accepted_ms"],
                         "end_accepted_ms": accepted_ms,
+                        "is_live_stream": rec.get("is_live_stream", False),
                     },
                     accepted_ms,
                 )

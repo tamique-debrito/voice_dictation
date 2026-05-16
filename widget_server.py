@@ -1492,6 +1492,7 @@ class WidgetServer:
         self._state_lock = threading.Lock()
         self._capture: str = "passive"
         self._recording_started_at: Optional[int] = None
+        self._is_live_stream: bool = False
         self._aside_started_at: Optional[int] = None
         self._muted: bool = False
         # Currently-open marker intervals: key → opened_at_accepted_ms.
@@ -1636,12 +1637,17 @@ class WidgetServer:
                 if a == "recording_started":
                     self._capture = "recording"
                     self._recording_started_at = ev.emit_accepted_ms
+                    self._is_live_stream = bool(
+                        ev.payload.get("is_live_stream", False)
+                    )
                 elif a == "paste_window_complete":
                     self._capture = "passive"
                     self._recording_started_at = None
+                    self._is_live_stream = False
                 elif a == "cancel":
                     self._capture = "passive"
                     self._recording_started_at = None
+                    self._is_live_stream = False
                 elif a == "aside_started":
                     self._capture = "aside"
                     self._aside_started_at = ev.emit_accepted_ms
@@ -1666,13 +1672,18 @@ class WidgetServer:
                     if k is not None:
                         self._open_markers.pop(k, None)
             elif ev.topic == "paste.actions":
-                self._paste_log.append({
-                    "paste_idx": ev.payload.get("paste_idx"),
-                    "start_accepted_ms": ev.payload.get("start_accepted_ms"),
-                    "end_accepted_ms": ev.payload.get("end_accepted_ms"),
-                    "text": ev.payload.get("text", ""),
-                    "is_aside": ev.payload.get("is_aside", False),
-                })
+                # Stream-edit events are partial (per-segment) and don't
+                # represent a discrete paste; skip them in the paste log.
+                if ev.payload.get("kind") == "stream_edit":
+                    pass
+                else:
+                    self._paste_log.append({
+                        "paste_idx": ev.payload.get("paste_idx"),
+                        "start_accepted_ms": ev.payload.get("start_accepted_ms"),
+                        "end_accepted_ms": ev.payload.get("end_accepted_ms"),
+                        "text": ev.payload.get("text", ""),
+                        "is_aside": ev.payload.get("is_aside", False),
+                    })
 
     @staticmethod
     def _serialize(ev: Event) -> dict:
@@ -1787,6 +1798,7 @@ class WidgetServer:
         with self._state_lock:
             state = {
                 "capture": self._capture,
+                "is_live_stream": self._is_live_stream,
                 "muted": self._muted,
                 # List of {key, opened_at_accepted_ms, age_ms} for the UI pill.
                 "open_markers": [
