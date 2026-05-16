@@ -1,5 +1,6 @@
-__pycache__/
+sessions/
 *.pyc
+__pycache__/
 recordings/
 .env
 recordings.zip
@@ -8,3 +9,20 @@ local_config.json
 .DS_Store
 **/.DS_Store
 transcripts/
+regenerated_sessions/
+
+# Fine-tune outputs — model weights and per-segment WAV clips are large and
+# regenerable via the voice-dictation-finetune skill. Not source of truth.
+models/
+datasets/
+
+# Local-LLM eval outputs (one md per run; runs are reproducible from prompts).
+llm_eval/runs/
+
+# In-iteration prompts. Stable prompts live in llm_eval/prompts/*.md (committed);
+# the wip/ subdir is the sandbox for revisions and is gitignored.
+llm_eval/prompts/wip/
+
+# Ground truth is a symlink into scratch/ during iteration. Move out of scratch
+# and remove this line when ready to commit.
+llm_eval/ground_truth.md
