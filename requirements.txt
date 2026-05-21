@@ -1,0 +1,6 @@
+webrtcvad
+pyaudio
+numpy
+faster-whisper
+pyperclip
+pynput
