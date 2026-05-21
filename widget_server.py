@@ -435,6 +435,36 @@ header .pill-row label { color: var(--muted); font-size: 11px; }
 #settings-status { color: var(--muted); font-size: 11px; flex: 1; }
 #settings-status.ok { color: var(--good); }
 #settings-status.err { color: var(--bad); }
+
+/* Markers editor */
+.markers-list { display: flex; flex-direction: column; gap: 6px; }
+.marker-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  background: #1a1d24; border-radius: 4px; padding: 6px 8px;
+}
+.marker-item-fields {
+  flex: 1; display: grid; gap: 4px;
+  grid-template-columns: 60px 1fr 2fr; align-items: center;
+}
+.marker-field { display: flex; flex-direction: column; gap: 2px; }
+.marker-field label { font-size: 10px; color: var(--muted); font-family: monospace; }
+.marker-field input {
+  background: #0e1015; color: var(--fg);
+  border: 1px solid #2a2e38; border-radius: 3px;
+  padding: 3px 5px; font-size: 12px; font-family: monospace; width: 100%;
+}
+.marker-remove {
+  flex: 0 0 auto; margin-top: 2px;
+  background: none; border: 1px solid #3a3f4d; color: var(--muted);
+  border-radius: 3px; cursor: pointer; font-size: 12px; padding: 2px 6px;
+}
+.marker-remove:hover { background: var(--bad); color: #fff; border-color: var(--bad); }
+.marker-add-btn {
+  margin-top: 4px; padding: 4px 12px; border-radius: 3px;
+  border: 1px dashed #3a3f4d; background: none; color: var(--muted);
+  font-size: 11px; cursor: pointer; align-self: flex-start;
+}
+.marker-add-btn:hover { color: var(--fg); border-color: var(--fg); }
 </style>
 </head>
 <body>
@@ -981,12 +1011,12 @@ document.querySelectorAll("#events-filters .chip").forEach(ch => {
   else ch.classList.remove("on");
 });
 
-// Start collapsed/expanded as in v1.
+// All sections start collapsed.
 document.getElementById("pastes-section").classList.add("collapsed");
-document.getElementById("transcript-section").classList.remove("collapsed");
+document.getElementById("transcript-section").classList.add("collapsed");
 document.getElementById("events-section").classList.add("collapsed");
 document.getElementById("stats-section").classList.add("collapsed");
-document.getElementById("timeline-section").classList.remove("collapsed");
+document.getElementById("timeline-section").classList.add("collapsed");
 
 // ---- Stats panel --------------------------------------------------------
 
@@ -1123,6 +1153,7 @@ const CFG_HINTS = {
 // Field help text (path → string). Kept separate so hints stay terse.
 const CFG_HELP = {
   "audio.sample_rate":              "webrtcvad requires 8/16/32/48 kHz; 16 kHz is the default",
+  "audio_persist.enabled":          "persist microphone audio to disk as wav/mp3 chunks; disable to save disk space",
   "audio_persist.chunk_seconds":    "size of each persisted audio chunk in seconds of accepted audio",
   "audio_persist.mp3_bitrate_kbps": "only used when format=mp3",
   "preprocessor.silence_boundary_ms": "ms of continuous silence after voice to fire a boundary event",
@@ -1270,7 +1301,7 @@ function buildRow(path, key, value) {
 // Render a section card for a top-level config key; recurses into nested objects.
 function buildSection(rootEl, name, obj, pathPrefix) {
   const sec = document.createElement("div");
-  sec.className = "cfg-section";
+  sec.className = "cfg-section collapsed";
   const h = document.createElement("h4");
   h.textContent = name;
   h.addEventListener("click", () => sec.classList.toggle("collapsed"));
@@ -1280,6 +1311,66 @@ function buildSection(rootEl, name, obj, pathPrefix) {
   sec.appendChild(body);
   buildBody(body, obj, pathPrefix);
   rootEl.appendChild(sec);
+}
+
+// Build a discrete markers editor section (replaces raw JSON textarea).
+function buildMarkersSection(rootEl) {
+  const sec = document.createElement("div");
+  sec.className = "cfg-section collapsed";
+  const h = document.createElement("h4");
+  h.textContent = "markers";
+  h.addEventListener("click", () => sec.classList.toggle("collapsed"));
+  sec.appendChild(h);
+  const body = document.createElement("div");
+  body.className = "cfg-body";
+  const list = document.createElement("div");
+  list.className = "markers-list";
+  list.dataset.cfgPath = "markers";
+  list.dataset.cfgType = "markers-list";
+  body.appendChild(list);
+  const addBtn = document.createElement("button");
+  addBtn.className = "marker-add-btn";
+  addBtn.type = "button";
+  addBtn.textContent = "+ Add marker";
+  addBtn.addEventListener("click", () => addMarkerItem(list, {key: "", type: "", description: ""}));
+  body.appendChild(addBtn);
+  sec.appendChild(body);
+  rootEl.appendChild(sec);
+  return list;
+}
+
+function addMarkerItem(list, marker) {
+  const item = document.createElement("div");
+  item.className = "marker-item";
+  const fields = document.createElement("div");
+  fields.className = "marker-item-fields";
+  for (const [cls, labelText, placeholder, valKey] of [
+    ["marker-key",  "key",         "1",                    "key"],
+    ["marker-type", "type",        "assistant_annotation", "type"],
+    ["marker-desc", "description", "Describe this marker…","description"],
+  ]) {
+    const wrap = document.createElement("div");
+    wrap.className = "marker-field";
+    const lbl = document.createElement("label");
+    lbl.textContent = labelText;
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = cls;
+    inp.placeholder = placeholder;
+    inp.value = (marker[valKey] || "");
+    wrap.appendChild(lbl);
+    wrap.appendChild(inp);
+    fields.appendChild(wrap);
+  }
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "marker-remove";
+  removeBtn.title = "Remove marker";
+  removeBtn.textContent = "✕";
+  removeBtn.addEventListener("click", () => item.remove());
+  item.appendChild(fields);
+  item.appendChild(removeBtn);
+  list.appendChild(item);
 }
 
 function buildBody(parent, obj, pathPrefix) {
@@ -1305,6 +1396,12 @@ function renderConfigForm(config) {
   settingsForm.innerHTML = "";
   // Top-level keys get their own collapsible section.
   for (const [k, v] of Object.entries(config)) {
+    if (k === "markers") {
+      // Special-cased: discrete add/remove UI instead of raw JSON textarea.
+      const list = buildMarkersSection(settingsForm);
+      for (const m of (v || [])) addMarkerItem(list, m);
+      continue;
+    }
     if (isPlainObject(v)) {
       buildSection(settingsForm, k, v, k);
     } else {
@@ -1312,7 +1409,7 @@ function renderConfigForm(config) {
       let gen = settingsForm.querySelector(".cfg-section[data-gen]");
       if (!gen) {
         gen = document.createElement("div");
-        gen.className = "cfg-section";
+        gen.className = "cfg-section collapsed";
         gen.dataset.gen = "1";
         const h = document.createElement("h4");
         h.textContent = "(top level)";
@@ -1346,7 +1443,17 @@ function collectConfigForm() {
     const path = el.dataset.cfgPath;
     const type = el.dataset.cfgType;
     let v;
-    if (type === "boolean") v = el.checked;
+    if (type === "markers-list") {
+      // Collect discrete marker rows.
+      v = [];
+      for (const item of el.querySelectorAll(".marker-item")) {
+        v.push({
+          key:         item.querySelector(".marker-key").value,
+          type:        item.querySelector(".marker-type").value,
+          description: item.querySelector(".marker-desc").value,
+        });
+      }
+    } else if (type === "boolean") v = el.checked;
     else if (type === "int") v = parseInt(el.value, 10);
     else if (type === "float") v = parseFloat(el.value);
     else if (type === "number") v = (el.value === "" ? "" : Number(el.value));
