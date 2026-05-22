@@ -1175,6 +1175,7 @@ const CFG_HELP = {
   "app.hf_hub_offline":             "skip HuggingFace 'check for updates' on model load",
   "app.persist_raw_keystrokes":     "record pre-double-tap keystrokes (debug only)",
   "app.debug_flag_key":             "single character; double-tap stamps a debug flag",
+  "hotkeys.settle_after":           "seconds to wait after a double-tap before committing it; same-key extra presses are absorbed, any other character cancels (0 = fire immediately)",
 };
 
 function setSettingsStatus(text, kind) {

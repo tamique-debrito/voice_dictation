@@ -141,6 +141,10 @@ class HotkeyConfig:
         "discard_recording": "x",
         "toggle_aside": "a",
     })
+    # Seconds to wait after a double-tap is detected before committing it.
+    # During this window extra same-key presses are absorbed; any other
+    # character cancels the pending action.  Set to 0 for immediate fire.
+    settle_after: float = 0.5
 
 
 @dataclass

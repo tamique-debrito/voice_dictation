@@ -108,8 +108,15 @@ class UserActionManager:
             | {"q", "m", self._debug_flag_key}
         )
         self._dt = BareDoubleTap(
-            window=1.0, keys=action_keys, on_double_tap=self._on_double_tap,
+            window=1.0,
+            keys=action_keys,
+            on_double_tap=self._on_double_tap,
+            settle_after=hotkey_cfg.settle_after,
+            on_candidate=self._on_candidate,
         )
+        # real_ms captured at detection time (on_candidate), consumed at commit
+        # (on_double_tap). Keyed by char so concurrent markers don't clobber.
+        self._candidate_real_ms: dict[str, int] = {}
 
         self._real_clock = _SessionRealClock()
         self._press_seq = itertools.count(1)
@@ -163,15 +170,24 @@ class UserActionManager:
         if char is not None:
             self._dt.feed(char)
 
-    def _on_double_tap(self, char: str) -> None:
-        real_ms = self._real_clock.now_ms()
-        # Backspace-out the two visible keystrokes; best-effort.
+    def _on_candidate(self, char: str) -> None:
+        """Fires immediately when the double-tap is detected (before settle).
+
+        Captures the real-time timestamp so the accepted-ms stamp isn't skewed
+        by the settle delay, and backspace-undoes the two visible keystrokes so
+        the user gets instant visual feedback.
+        """
+        self._candidate_real_ms[char] = self._real_clock.now_ms()
         if self._kb is not None:
             try:
                 self._kb.tap(keyboard.Key.backspace)
                 self._kb.tap(keyboard.Key.backspace)
             except Exception:
                 logger.exception("backspace-undo failed")
+
+    def _on_double_tap(self, char: str) -> None:
+        """Fires after the settle window passes without cancellation."""
+        real_ms = self._candidate_real_ms.pop(char, self._real_clock.now_ms())
         self._commit(char, real_ms)
 
     # ------------------------------------------------------------------
