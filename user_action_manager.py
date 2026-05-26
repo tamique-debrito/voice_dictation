@@ -112,6 +112,7 @@ class UserActionManager:
             keys=action_keys,
             on_double_tap=self._on_double_tap,
             settle_after=hotkey_cfg.settle_after,
+            quiet_before=hotkey_cfg.quiet_before,
             on_candidate=self._on_candidate,
         )
         # real_ms captured at detection time (on_candidate), consumed at commit

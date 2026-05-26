@@ -145,6 +145,9 @@ class HotkeyConfig:
     # During this window extra same-key presses are absorbed; any other
     # character cancels the pending action.  Set to 0 for immediate fire.
     settle_after: float = 0.5
+    # Minimum seconds of typing silence required before a double-tap is
+    # recognised.  Prevents mid-word repeated letters from firing a marker.
+    quiet_before: float = 2.0
 
 
 @dataclass

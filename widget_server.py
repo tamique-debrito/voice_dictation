@@ -1176,6 +1176,7 @@ const CFG_HELP = {
   "app.persist_raw_keystrokes":     "record pre-double-tap keystrokes (debug only)",
   "app.debug_flag_key":             "single character; double-tap stamps a debug flag",
   "hotkeys.settle_after":           "seconds to wait after a double-tap before committing it; same-key extra presses are absorbed, any other character cancels (0 = fire immediately)",
+  "hotkeys.quiet_before":           "minimum seconds of typing silence before a double-tap is recognised; prevents mid-word repeated letters from firing a hotkey",
 };
 
 function setSettingsStatus(text, kind) {
